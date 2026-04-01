@@ -1,0 +1,36 @@
+import sys
+
+from sherpa.commands import Commands
+from sherpa.commands.commit import CommitCommand
+from sherpa.git import in_git_repo
+from sherpa.utils import extract_model_flag
+from sherpa.constants import DEFAULT_MODEL
+
+def main():
+    if not in_git_repo():
+        print("Error: sherpa must be run inside a git repo", file=sys.stderr)
+        return 1
+
+    sherpa_args, model, error = extract_model_flag()
+    if not model:
+        model = DEFAULT_MODEL
+    if error:
+        print(f"Error: {error}", file=sys.stderr)
+        return 1
+
+    if not sherpa_args:
+        print("Error: no provided args", file=sys.stderr)
+
+    command = sherpa_args[0]
+    match command:
+        case Commands.COMMIT.value:
+            CommitCommand.execute(sherpa_args[1:], model)
+        case Commands.FIX.value:
+            pass
+        case Commands.REVIEW.value:
+            pass
+        case _:
+            print(f"Error: unrecognized {command} command", file=sys.stderr)
+
+if __name__ == "__main__":
+    main()
