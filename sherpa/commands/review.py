@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 from agnos import AgentOptions, AgentQueryCompleted, AgentText, query
 from sherpa.commands.base import Command
 from sherpa.git import get_git_repo_root
@@ -21,7 +21,7 @@ class Issue:
 
 @dataclass
 class ReviewResult:
-    decision: str
+    decision: Literal["APPROVE", "BLOCKED"]
     summary: str
     high_issues: list[Issue]
     medium_issues: list[Issue]
@@ -30,7 +30,7 @@ class ReviewResult:
 
 
 def extract_review_result(review: dict | str) -> Optional[ReviewResult]:
-    decision = str(review.get("decision", "")).strip().lower()
+    decision = str(review.get("decision", "UNRECOGNIZED")).strip().upper()
     summary = str(review.get("summary", "")).strip()
     issues = review.get("issues")
 
@@ -113,25 +113,13 @@ class ReviewCommand(Command):
         review = review.strip().removeprefix("```json").removesuffix("```").strip()
         try:
             json_review = json.loads(review)
-            ReviewCommand.generate_report(json_review)
-            return
-            # return json_review, total_cost_usd
+            review_result = extract_review_result(json_review)
+            if review_result:
+                render_review_report(review_result)
+
+            return review_result, total_cost_usd
         except json.JSONDecodeError:
             print("[sherpa] Model did not respond with valid JSON. Will show raw output")
-
-        ReviewCommand.generate_report(review)
-        return
-        # return review, total_cost_usd
-
-    @staticmethod
-    def generate_report(review: dict | str):
-        # if review is not a valid json we just raw print it
-        if isinstance(review, str):
             print(review)
-            return
+            return review, total_cost_usd
 
-        review_result = extract_review_result(review)
-        if not review_result:
-            return
-
-        render_review_report(review_result)

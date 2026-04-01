@@ -9,7 +9,7 @@ def get_review_prompt(
 You are reviewing git changes
 Return ONLY valid JSON with this exact shape:
 {{
-"decision": "approve" | "request_changes",
+"decision": "APPROVE" | "BLOCKED",
 "summary": "short one-line summary",
 "issues": [
     {{
@@ -40,10 +40,10 @@ Review criteria:
 - high: H0, H1, ...
 - medium: M0, M1, ...
 - low: L0, L1, ...
-- High severity issues are blocking and should use decision=request_changes.
+- High severity issues are blocking and should use decision=BLOCKED.
 - Medium severity issues are warnings only and should not block.
 - Low severity issues are informational only.
-- If there are no high severity issues, use decision=approve.
+- If there are no high severity issues, use decision=APPROVE.
 - Use "nice_to_have" for optional suggestions and assign IDs N0, N1, ...
 - Return at most 2 nice_to_have items, ordered by impact (highest first).
 

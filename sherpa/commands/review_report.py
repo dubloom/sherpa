@@ -79,10 +79,10 @@ def render_review_report(review_result) -> None:
         + len(review_result.low_issues)
     )
 
-    decision_color = GREEN if review_result.decision == "approve" else RED
+    decision_color = GREEN if review_result.decision == "APPROVE" else RED
     print()
     print(colorize("=== Sherpa Review Report ===", CYAN, bold=True))
-    print(colorize(f"Decision: {review_result.decision.upper()}", decision_color, bold=True))
+    print(colorize(f"Decision: {review_result.decision}", decision_color, bold=True))
     summary_width = max(60, min(120, shutil.get_terminal_size(fallback=(100, 20)).columns - 2))
     summary_lines = wrap_text(review_result.summary, summary_width - len("Summary: "))
     if summary_lines:
@@ -102,3 +102,5 @@ def render_review_report(review_result) -> None:
     _print_severity_block("Medium severity", review_result.medium_issues, "~", ORANGE)
     _print_severity_block("Low severity", review_result.low_issues, "-", YELLOW)
     _print_severity_block("Nice to have", review_result.nits, "+", BLUE)
+    print()
+    print()
