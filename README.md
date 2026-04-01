@@ -37,6 +37,28 @@ The review will contain four potential categories of feedback:
 
 Each issue/nit will be marked with an identifier than can be used later for the fixing stage.
 
+### Fix selected issues
+
+Use `sherpa fix` to select one or more issues from the latest stored review and apply fixes.
+
+```bash
+sherpa fix
+```
+
+You can target specific issue IDs:
+
+```bash
+sherpa fix H0 M1
+```
+
+Before each selected fix task starts, Sherpa prompts:
+
+```text
+Extra Instruction:
+```
+
+Leave it blank to run without extra instructions.
+
 ### Review
 
 If you want to review an existing commit, you can use

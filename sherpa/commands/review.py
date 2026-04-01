@@ -89,6 +89,15 @@ class ReviewCommand(Command):
         options = AgentOptions(
             cwd=repo_root,
             model=model,
+            allowed_tools=["Read", "Glob", "Grep"],
+            instructions=(
+                "Before producing the review, inspect potentially impacted files "
+                "(for example nearby callers, shared helpers, and related tests) "
+                "to validate behavioral impact and context. "
+                "Keep exploration bounded: inspect at most 5 additional files and "
+                "use at most 12 tool calls before returning the best possible JSON."
+            ),
+            max_turns=25
         )
 
         review = ""
@@ -99,10 +108,13 @@ class ReviewCommand(Command):
             if isinstance(message, AgentText):
                 review += message.text + "\n"
             elif isinstance(message, AgentQueryCompleted):
+                # TODO: give a second look to that when working on agnos
+                # OpenAI may only populate final assistant text on completion.
+                if not review.strip() and isinstance(message.message, str) and message.message.strip():
+                    review = message.message.strip()
                 raw_cost = message.extra.get("total_cost_usd")
                 if isinstance(raw_cost, int | float):
                     total_cost_usd = float(raw_cost)
-                    # print(total_cost_usd)
 
         # The agent will give an answer like:
         # ```json
@@ -114,7 +126,8 @@ class ReviewCommand(Command):
         try:
             json_review = json.loads(review)
             review_result = extract_review_result(json_review)
-
+            if review_result is None:
+                return json.dumps(json_review), total_cost_usd
             return review_result, total_cost_usd
         except json.JSONDecodeError:
             print("[sherpa] Model did not respond with valid JSON. Will show raw output")

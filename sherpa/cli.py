@@ -2,9 +2,10 @@ import sys
 
 from sherpa.commands import Commands
 from sherpa.commands.commit import CommitCommand
+from sherpa.commands.fix import FixCommand
 from sherpa.git import in_git_repo
 from sherpa.utils import extract_model_flag
-from sherpa.constants import DEFAULT_MODEL
+from sherpa.supported_models import DEFAULT_MODEL
 
 def main():
     if not in_git_repo():
@@ -20,17 +21,21 @@ def main():
 
     if not sherpa_args:
         print("Error: no provided args", file=sys.stderr)
+        return 1
 
     command = sherpa_args[0]
     match command:
         case Commands.COMMIT.value:
             CommitCommand.execute(sherpa_args[1:], model)
         case Commands.FIX.value:
-            pass
+            FixCommand.execute(sherpa_args[1:], model)
         case Commands.REVIEW.value:
             pass
         case _:
             print(f"Error: unrecognized {command} command", file=sys.stderr)
+            return 1
+
+    return 0
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
