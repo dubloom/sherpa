@@ -31,13 +31,14 @@ class CommitCommand(Command):
 
         if review_result_decision == "APPROVE":
             print("[sherpa] The commit was approved !")
+            subprocess.run(["git", "commit", *args], cwd=root)
             print("[sherpa] Showing review output....")
             render_review_report(review_result)
         elif review_result_decision == "BLOCKED":
+            render_review_report(review_result)
             print("[sherpa] The commit will be blocked, sorry :/ !")
         else:
             print("[sherpa] Review decision unrecognized, no decision will be taken...")
 
-        subprocess.run(["git", "commit", *args], cwd=root)
         print(f"[sherpa] Total cost of your review: {total_cost}$")
         print()
