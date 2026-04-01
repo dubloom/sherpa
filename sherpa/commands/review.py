@@ -114,12 +114,9 @@ class ReviewCommand(Command):
         try:
             json_review = json.loads(review)
             review_result = extract_review_result(json_review)
-            if review_result:
-                render_review_report(review_result)
 
             return review_result, total_cost_usd
         except json.JSONDecodeError:
             print("[sherpa] Model did not respond with valid JSON. Will show raw output")
-            print(review)
             return review, total_cost_usd
 

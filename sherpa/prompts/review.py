@@ -41,6 +41,7 @@ Review criteria:
 - medium: M0, M1, ...
 - low: L0, L1, ...
 - High severity issues are blocking and should use decision=BLOCKED.
+High should not be taken lightly and should be mainly around code malfunction.
 - Medium severity issues are warnings only and should not block.
 - Low severity issues are informational only.
 - If there are no high severity issues, use decision=APPROVE.

@@ -73,34 +73,39 @@ def _print_severity_block(title: str, items: list, marker: str, color: str) -> N
 
 
 def render_review_report(review_result) -> None:
-    total_issues = (
-        len(review_result.high_issues)
-        + len(review_result.medium_issues)
-        + len(review_result.low_issues)
-    )
+    if isinstance(review_result, str):
+        # it means the review could not be parsed
+        print(review_result)
+    else:
+        total_issues = (
+            len(review_result.high_issues)
+            + len(review_result.medium_issues)
+            + len(review_result.low_issues)
+        )
 
-    decision_color = GREEN if review_result.decision == "APPROVE" else RED
-    print()
-    print(colorize("=== Sherpa Review Report ===", CYAN, bold=True))
-    print(colorize(f"Decision: {review_result.decision}", decision_color, bold=True))
-    summary_width = max(60, min(120, shutil.get_terminal_size(fallback=(100, 20)).columns - 2))
-    summary_lines = wrap_text(review_result.summary, summary_width - len("Summary: "))
-    if summary_lines:
-        print(f"Summary: {summary_lines[0]}")
-        for line in summary_lines[1:]:
-            print(f"         {line}")
-    print(
-        "Counts: "
-        f"{colorize(f'high={len(review_result.high_issues)}', RED, bold=True)}, "
-        f"{colorize(f'medium={len(review_result.medium_issues)}', ORANGE, bold=True)}, "
-        f"{colorize(f'low={len(review_result.low_issues)}', YELLOW, bold=True)}, "
-        f"{colorize(f'nits={len(review_result.nits)}', BLUE, bold=True)}"
-    )
-    print(f"Total issues: {total_issues}")
+        decision_color = GREEN if review_result.decision == "APPROVE" else RED
+        print()
+        print(colorize("=== Sherpa Review Report ===", CYAN, bold=True))
+        print(colorize(f"Decision: {review_result.decision}", decision_color, bold=True))
+        summary_width = max(60, min(120, shutil.get_terminal_size(fallback=(100, 20)).columns - 2))
+        summary_lines = wrap_text(review_result.summary, summary_width - len("Summary: "))
+        if summary_lines:
+            print(f"Summary: {summary_lines[0]}")
+            for line in summary_lines[1:]:
+                print(f"         {line}")
+        print(
+            "Counts: "
+            f"{colorize(f'high={len(review_result.high_issues)}', RED, bold=True)}, "
+            f"{colorize(f'medium={len(review_result.medium_issues)}', ORANGE, bold=True)}, "
+            f"{colorize(f'low={len(review_result.low_issues)}', YELLOW, bold=True)}, "
+            f"{colorize(f'nits={len(review_result.nits)}', BLUE, bold=True)}"
+        )
+        print(f"Total issues: {total_issues}")
 
-    _print_severity_block("High severity", review_result.high_issues, "!", RED)
-    _print_severity_block("Medium severity", review_result.medium_issues, "~", ORANGE)
-    _print_severity_block("Low severity", review_result.low_issues, "-", YELLOW)
-    _print_severity_block("Nice to have", review_result.nits, "+", BLUE)
+        _print_severity_block("High severity", review_result.high_issues, "!", RED)
+        _print_severity_block("Medium severity", review_result.medium_issues, "~", ORANGE)
+        _print_severity_block("Low severity", review_result.low_issues, "-", YELLOW)
+        _print_severity_block("Nice to have", review_result.nits, "+", BLUE)
+
     print()
     print()
