@@ -1,6 +1,7 @@
 import sys
 
 from sherpa.commands import Commands
+from sherpa.commands.address import AddressCommand
 from sherpa.commands.commit import CommitCommand
 from sherpa.commands.fix import FixCommand
 from sherpa.git import in_git_repo
@@ -25,11 +26,13 @@ def main():
 
     command = sherpa_args[0]
     match command:
-        case Commands.COMMIT.value:
+        case Commands.COMMIT:
             CommitCommand.execute(sherpa_args[1:], model)
-        case Commands.FIX.value:
+        case Commands.FIX:
             FixCommand.execute(sherpa_args[1:], model)
-        case Commands.REVIEW.value:
+        case Commands.ADDRESS:
+            AddressCommand.execute(sherpa_args[1:], model)
+        case Commands.REVIEW:
             pass
         case _:
             print(f"Error: unrecognized {command} command", file=sys.stderr)
