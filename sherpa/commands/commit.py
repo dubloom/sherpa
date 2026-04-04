@@ -3,7 +3,7 @@ import re
 import subprocess
 from sherpa.commands.base import Command
 from sherpa.commands.review import ReviewCommand, ReviewResult
-from sherpa.commands.review_report import render_review_report
+from sherpa.commands.review.report import render_review_report
 from sherpa.git import get_git_repo_root, get_staged_changes
 from sherpa.review_store import save_review
 from sherpa.utils import extract_commit_message
