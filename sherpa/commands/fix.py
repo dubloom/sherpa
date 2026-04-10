@@ -448,7 +448,7 @@ async def _run_fix_agent_turn(
     issue: Issue,
     stored: StoredReview,
     extra_instruction: Optional[str],
-) -> Optional[float]:
+) -> tuple[Optional[float], Optional[str]]:
     prompt = get_fix_issue_prompt(
         workspace_root,
         issue,
@@ -457,12 +457,15 @@ async def _run_fix_agent_turn(
         extra_instruction=extra_instruction,
     )
     total_cost_usd: Optional[float] = None
+    completion_message: Optional[str] = None
     async for message in client.query_streamed(prompt, session_id=session_id):
         if isinstance(message, AgentQueryCompleted):
             raw_cost = message.total_cost_usd
             if isinstance(raw_cost, int | float):
                 total_cost_usd = float(raw_cost)
-    return total_cost_usd
+            if isinstance(message.message, str) and message.message.strip():
+                completion_message = message.message.strip()
+    return total_cost_usd, completion_message
 
 
 async def _run_fixes_parallel(
@@ -475,7 +478,7 @@ async def _run_fixes_parallel(
     progress_cb: Optional[Callable[[str, str], None]] = None,
     done_cb: Optional[
         Callable[
-            [str, int, Optional[float], Optional[Exception], list[str], dict[str, Optional[bytes]]],
+            [str, int, Optional[float], Optional[str], Optional[Exception], list[str], dict[str, Optional[bytes]]],
             tuple[str, Optional[str]],
         ]
     ] = None,
@@ -522,7 +525,7 @@ async def _run_fixes_parallel(
 
                 async with AgnosClient(options) as client:
                     while True:
-                        attempt_cost = await _run_fix_agent_turn(
+                        attempt_cost, completion_message = await _run_fix_agent_turn(
                             client,
                             session_id,
                             workspace_root,
@@ -544,6 +547,7 @@ async def _run_fixes_parallel(
                                 issue.name,
                                 attempt,
                                 attempt_cost,
+                                completion_message,
                                 None,
                                 changed_paths,
                                 after_snapshot,
@@ -568,7 +572,7 @@ async def _run_fixes_parallel(
                 if progress_cb is not None:
                     progress_cb(issue.name, "failed")
                 if done_cb is not None:
-                    done_cb(issue.name, 1, None, e, [], {})
+                    done_cb(issue.name, 1, None, None, e, [], {})
                 return issue.name, None, e, [], {}
             finally:
                 if workspace_root is not None:
@@ -775,6 +779,7 @@ class FixCommand(Command):
             issue_name: str,
             attempt: int,
             _cost: Optional[float],
+            completion_message: Optional[str],
             err: Optional[Exception],
             changed_paths: list[str],
             after_snapshot: dict[str, Optional[bytes]],
@@ -788,6 +793,9 @@ class FixCommand(Command):
 
                 if not changed_paths:
                     print(_colorize(f"[sherpa] [{issue_name}] no changes detected.", YELLOW))
+                    if completion_message:
+                        print(_colorize("[sherpa] Agent completion message:", CYAN))
+                        print(completion_message)
                     if _prompt_yes_no(
                         _colorize_bold(
                             f"[sherpa] Retry [{issue_name}] with a new instruction in the same agent session?",
@@ -872,6 +880,7 @@ class FixCommand(Command):
             issue_name: str,
             attempt: int,
             cost: Optional[float],
+            completion_message: Optional[str],
             err: Optional[Exception],
             changed_paths: list[str],
             after_snapshot: dict[str, Optional[bytes]],
@@ -884,6 +893,7 @@ class FixCommand(Command):
                     issue_name,
                     attempt,
                     cost,
+                    completion_message,
                     err,
                     changed_paths,
                     after_snapshot,
