@@ -1,9 +1,11 @@
 import sys
 
 from sherpa.commands import Commands
+from sherpa.commands.address import AddressCommand
 from sherpa.commands.commit import CommitCommand
 from sherpa.commands.fix import FixCommand
-from sherpa.git import in_git_repo
+from sherpa.commands.review import ReviewCommand
+from sherpa.git import get_git_repo_root, in_git_repo
 from sherpa.utils import extract_model_flag
 from sherpa.supported_models import DEFAULT_MODEL
 
@@ -23,14 +25,17 @@ def main():
         print("Error: no provided args", file=sys.stderr)
         return 1
 
+    git_repo_root = get_git_repo_root()
     command = sherpa_args[0]
     match command:
         case Commands.COMMIT.value:
-            CommitCommand.execute(sherpa_args[1:], model)
+            CommitCommand.execute(sherpa_args[1:], git_repo_root, model)
         case Commands.FIX.value:
-            FixCommand.execute(sherpa_args[1:], model)
+            FixCommand.execute(sherpa_args[1:], git_repo_root, model)
+        case Commands.ADDRESS.value:
+            AddressCommand.execute(sherpa_args[1:], git_repo_root, model)
         case Commands.REVIEW.value:
-            pass
+            ReviewCommand.execute(sherpa_args[1:], git_repo_root, model)
         case _:
             print(f"Error: unrecognized {command} command", file=sys.stderr)
             return 1

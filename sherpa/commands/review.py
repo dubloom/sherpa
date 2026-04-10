@@ -74,7 +74,7 @@ def extract_review_result(review: dict | str) -> Optional[ReviewResult]:
 
 class ReviewCommand(Command):
     @staticmethod
-    def execute(args: list[str], model: str):
+    def execute(args: list[str], repo_root: Path, model: str):
         print("[sherpa] Reviewing staged changes")
 
     @staticmethod
@@ -94,9 +94,9 @@ class ReviewCommand(Command):
                 "Before producing the review, inspect potentially impacted files "
                 "(for example nearby callers, shared helpers, and related tests) "
                 "to validate behavioral impact and context. "
-                "Keep exploration bounded: inspect at most 5 additional files and "
-                "use at most 12 tool calls before returning the best possible JSON."
+                "Keep exploration bounded: inspect at most 5 additional files."
             ),
+            reasoning="medium",
             max_turns=25
         )
 
@@ -112,7 +112,7 @@ class ReviewCommand(Command):
                 # OpenAI may only populate final assistant text on completion.
                 if not review.strip() and isinstance(message.message, str) and message.message.strip():
                     review = message.message.strip()
-                raw_cost = message.extra.get("total_cost_usd")
+                raw_cost = message.total_cost_usd
                 if isinstance(raw_cost, int | float):
                     total_cost_usd = float(raw_cost)
 

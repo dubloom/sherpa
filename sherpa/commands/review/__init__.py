@@ -1,10 +1,15 @@
+import asyncio
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import re
 from typing import Literal, Optional
 from agnos import AgentOptions, AgentQueryCompleted, AgentText, query
 from sherpa.commands.base import Command
+from sherpa.commands.review.report import render_review_report
+from sherpa.git import get_staged_changes
 from sherpa.prompts.review import get_review_prompt
+from sherpa.utils import extract_commit_message
 
 
 @dataclass
@@ -72,8 +77,53 @@ def extract_review_result(review: dict | str) -> Optional[ReviewResult]:
 
 class ReviewCommand(Command):
     @staticmethod
-    def execute(args: list[str], model: str):
+    def execute(args: list[str], repo_root: Path, model: str):
+        # Local import to avoid circular import at module initialization time.
+        from sherpa.review_store import save_review
+
         print("[sherpa] Reviewing staged changes")
+        commit_message = extract_commit_message(args)
+        modified_files, git_diff = get_staged_changes(repo_root)
+        if not modified_files and not git_diff:
+            print("[sherpa] It seems you don't have any staged changes, exiting...")
+            return
+
+        review_result, total_cost = asyncio.run(
+            ReviewCommand.review(repo_root, commit_message, modified_files, git_diff, model)
+        )
+        if isinstance(review_result, ReviewResult):
+            save_review(repo_root, commit_message, modified_files, git_diff, review_result, None)
+        else:
+            raw = str(review_result) if review_result is not None else None
+            save_review(repo_root, commit_message, modified_files, git_diff, None, raw)
+
+        review_result_decision = ""
+        if isinstance(review_result, ReviewResult):
+            review_result_decision = review_result.decision
+        else:
+            raw_review = str(review_result or "")
+            match = re.search(
+                r"^\s*decision\s*:\s*([A-Za-z_]+)",
+                raw_review,
+                re.IGNORECASE | re.MULTILINE
+            )
+            if match:
+                review_result_decision = match.group(1).strip().upper()
+
+        if review_result_decision == "APPROVE":
+            print("[sherpa] The review was approved !")
+            print("\n[sherpa] Showing review output....")
+            render_review_report(review_result)
+        elif review_result_decision == "BLOCKED":
+            render_review_report(review_result)
+            print("[sherpa] The review is blocked, sorry :/ !")
+        else:
+            print("[sherpa] Review decision unrecognized, no decision will be taken...")
+            print("[sherpa] Showing raw result:")
+            print(review_result)
+
+        print(f"[sherpa] Total cost of your review: {total_cost}$")
+        print()
 
     @staticmethod
     async def review(
@@ -110,7 +160,7 @@ class ReviewCommand(Command):
                 # OpenAI may only populate final assistant text on completion.
                 if not review.strip() and isinstance(message.message, str) and message.message.strip():
                     review = message.message.strip()
-                raw_cost = message.extra.get("total_cost_usd")
+                raw_cost = message.total_cost_usd
                 if isinstance(raw_cost, int | float):
                     total_cost_usd = float(raw_cost)
 

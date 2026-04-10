@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 import re
 import subprocess
 from sherpa.commands.base import Command
@@ -10,22 +11,21 @@ from sherpa.utils import extract_commit_message
 
 class CommitCommand(Command):
     @staticmethod
-    def execute(args: list[str], model: str):
+    def execute(args: list[str], repo_root: Path, model: str):
         print("[sherpa] Reviewing staged changes")
 
         commit_message = extract_commit_message(args)
-        root = get_git_repo_root()
-        modified_files, git_diff = get_staged_changes(root)
+        modified_files, git_diff = get_staged_changes(repo_root)
         if not modified_files and not git_diff:
             print("[sherpa] It seems you don't have any staged changes, exiting...")
             return
 
-        review_result, total_cost = asyncio.run(ReviewCommand.review(root, commit_message, modified_files, git_diff, model))
+        review_result, total_cost = asyncio.run(ReviewCommand.review(repo_root, commit_message, modified_files, git_diff, model))
         if isinstance(review_result, ReviewResult):
-            save_review(root, commit_message, modified_files, git_diff, review_result, None)
+            save_review(repo_root, commit_message, modified_files, git_diff, review_result, None)
         else:
             raw = str(review_result) if review_result is not None else None
-            save_review(root, commit_message, modified_files, git_diff, None, raw)
+            save_review(repo_root, commit_message, modified_files, git_diff, None, raw)
 
         review_result_decision = ""
         if isinstance(review_result, ReviewResult):
@@ -38,7 +38,7 @@ class CommitCommand(Command):
 
         if review_result_decision == "APPROVE":
             print("[sherpa] The commit was approved !")
-            subprocess.run(["git", "commit", *args], cwd=root)
+            subprocess.run(["git", "commit", *args], cwd=repo_root)
             print("\n[sherpa] Showing review output....")
             render_review_report(review_result)
         elif review_result_decision == "BLOCKED":
