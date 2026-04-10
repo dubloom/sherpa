@@ -1,5 +1,5 @@
 """
-Read-only terminal UI for GitHub PR review comment threads.
+Terminal UI for GitHub PR review comment threads.
 
 Style matches ``test_review/review_cli.py`` (ANSI, full redraw, code context panel).
 """
@@ -28,7 +28,21 @@ if TYPE_CHECKING:
     from sherpa.commands.address import CommentThread
 
 from sherpa.commands.address.git import post_pull_review_comment_reply
-from sherpa.commands.address.suggest_fix import suggest_fix_for_thread_async
+from sherpa.commands.address.suggest_fix import (
+    apply_fix_for_thread_async,
+    suggest_fix_for_thread_async,
+)
+from sherpa.commands.fix import (
+    _apply_issue_delta_to_main,
+    _capture_issue_delta,
+    _list_tracked_files,
+    _list_untracked_files,
+    _materialize_snapshot,
+    _print_single_file_diff,
+    _snapshot_files,
+)
+from sherpa.git import create_detached_worktree, remove_worktree
+from sherpa.utils import AUTO_RETRY_NO_CHANGE_INSTRUCTION, merge_instruction
 
 
 class Ansi:
@@ -352,7 +366,7 @@ def print_help(colorful: bool) -> None:
         "",
         "Other",
         "  r, reply              Write a reply (two blank lines to send) — posts on GitHub",
-        "  f, fix                Start fix flow: confirm fix, then optional AI suggestion",
+        "  f, fix                Optional AI suggestion, then writable fix agent + keep/retry",
         "  d, done               Remove current thread from this list (UI only)",
         "  h, help               Show this screen",
         "  q, quit               Exit",
@@ -362,6 +376,316 @@ def print_help(colorful: bool) -> None:
     print()
     print(style("Press Enter to return…", Ansi.DIM, enabled=colorful), end=" ")
     input()
+
+
+def read_single_line(prompt_text: str, *, colorful: bool) -> Optional[str]:
+    print(
+        style(prompt_text, Ansi.DIM, Ansi.FG_WHITE, enabled=colorful),
+        end="",
+        flush=True,
+    )
+    try:
+        raw = input().strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+    return raw or None
+
+
+def _show_suggestion_screen(
+    thread: CommentThread,
+    suggestion: str,
+    cost: Optional[float],
+    *,
+    colorful: bool,
+) -> None:
+    clear_screen()
+    width = max(40, get_terminal_size(fallback=(120, 40)).columns - 2)
+    title = " AI suggested fix (preview) "
+    print(style(title.ljust(width), Ansi.BG_NAVY, Ansi.FG_YELLOW, Ansi.BOLD, enabled=colorful))
+
+    loc = _code_location_dict(thread) or {}
+    path = loc.get("path")
+    line = loc.get("line") or loc.get("start_line")
+    location = f"{path}:{line}" if path and line else (path or "general")
+
+    print(style(f"Thread location: {location}", Ansi.FG_CYAN, enabled=colorful))
+    print(
+        style(
+            "Preview only. Next step launches a writable fix agent.",
+            Ansi.FG_GREEN,
+            Ansi.BOLD,
+            enabled=colorful,
+        )
+    )
+    if cost is not None:
+        print(style(f"Suggestion cost: ${cost:.4f}", Ansi.DIM, enabled=colorful))
+    print()
+
+    for line_text in suggestion.splitlines():
+        wrapped_lines = wrap_lines(line_text, width=width) if line_text else [""]
+        for wrapped in wrapped_lines:
+            print(style(wrapped, Ansi.FG_WHITE, enabled=colorful))
+
+    print()
+
+
+def _run_single_fix_attempt(
+    repo_root: Path,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    thread: CommentThread,
+    all_threads: list[CommentThread],
+    baseline_snapshot: dict[str, Optional[bytes]],
+    suggested_fix: Optional[str],
+    user_instruction: Optional[str],
+    model: str,
+) -> tuple[Optional[float], Optional[str], list[str], dict[str, Optional[bytes]]]:
+    workspace_root: Optional[Path] = None
+    label = f"address-thread-{thread.thread_id}"
+    try:
+        workspace_root = create_detached_worktree(repo_root, label)
+        _materialize_snapshot(workspace_root, baseline_snapshot)
+
+        attempt_cost, completion_message = asyncio.run(
+            apply_fix_for_thread_async(
+                workspace_root,
+                owner,
+                repo,
+                pr_number,
+                thread,
+                all_threads,
+                suggested_fix,
+                user_instruction,
+                model,
+            )
+        )
+        changed_paths, after_snapshot = _capture_issue_delta(
+            workspace_root, baseline_snapshot
+        )
+        return attempt_cost, completion_message, changed_paths, after_snapshot
+    finally:
+        if workspace_root is not None:
+            remove_worktree(repo_root, workspace_root)
+
+
+def _run_fix_agent_flow(
+    repo_root: Path,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    thread: CommentThread,
+    all_threads: list[CommentThread],
+    model: str,
+    suggested_fix: Optional[str],
+    initial_instruction: Optional[str],
+    *,
+    colorful: bool,
+) -> tuple[str, bool]:
+    tracked_files = _list_tracked_files(repo_root)
+    untracked_before_paths = _list_untracked_files(repo_root)
+    tracked_before = _snapshot_files(repo_root, tracked_files)
+    untracked_before = _snapshot_files(repo_root, untracked_before_paths)
+    baseline_snapshot: dict[str, Optional[bytes]] = {**tracked_before, **untracked_before}
+    main_baseline: dict[str, Optional[bytes]] = dict(baseline_snapshot)
+
+    current_instruction = initial_instruction
+    attempt = 1
+    auto_retry_for_no_changes_used = False
+    while True:
+        print()
+        print(
+            style(
+                f"Running fix agent (attempt {attempt})…",
+                Ansi.DIM,
+                Ansi.FG_WHITE,
+                enabled=colorful,
+            )
+        )
+        sys.stdout.flush()
+
+        try:
+            attempt_cost, completion_message, changed_paths, after_snapshot = _run_single_fix_attempt(
+                repo_root,
+                owner,
+                repo,
+                pr_number,
+                thread,
+                all_threads,
+                baseline_snapshot,
+                suggested_fix,
+                current_instruction,
+                model,
+            )
+        except Exception as exc:
+            return (f"Fix agent failed: {exc}", True)
+
+        if attempt_cost is not None:
+            print(style(f"Fix attempt cost: ${attempt_cost:.4f}", Ansi.DIM, enabled=colorful))
+        if completion_message:
+            print(style("Agent completion note:", Ansi.FG_CYAN, Ansi.BOLD, enabled=colorful))
+            for line in completion_message.splitlines():
+                print(style(line, Ansi.FG_WHITE, enabled=colorful))
+            print()
+
+        if not changed_paths:
+            print(
+                style(
+                    "No file changes detected in this attempt.",
+                    Ansi.FG_MAGENTA,
+                    enabled=colorful,
+                )
+            )
+            if not auto_retry_for_no_changes_used:
+                auto_retry_for_no_changes_used = True
+                current_instruction = merge_instruction(
+                    current_instruction,
+                    AUTO_RETRY_NO_CHANGE_INSTRUCTION,
+                )
+                print(
+                    style(
+                        "Retrying automatically with a strict write requirement...",
+                        Ansi.DIM,
+                        Ansi.FG_WHITE,
+                        enabled=colorful,
+                    )
+                )
+                attempt += 1
+                continue
+            if prompt_yes_no(
+                "Retry with a new instruction?",
+                colorful=colorful,
+                default_yes=True,
+            ):
+                retry_instruction = read_single_line("New Instruction: ", colorful=colorful)
+                if retry_instruction:
+                    current_instruction = merge_instruction(
+                        current_instruction, retry_instruction
+                    )
+                    attempt += 1
+                    continue
+                return ("Empty retry instruction; fix flow stopped.", False)
+            return ("No changes kept for this thread.", False)
+
+        print(style("Proposed changes:", Ansi.FG_CYAN, Ansi.BOLD, enabled=colorful))
+        for rel_path in changed_paths:
+            _print_single_file_diff(
+                rel_path,
+                baseline_snapshot.get(rel_path),
+                after_snapshot.get(rel_path),
+            )
+
+        if prompt_yes_no(
+            "Keep these changes?",
+            colorful=colorful,
+            default_yes=True,
+        ):
+            applied, already_present, conflicted = _apply_issue_delta_to_main(
+                repo_root,
+                changed_paths,
+                after_snapshot,
+                main_baseline,
+            )
+            if conflicted:
+                conflict_files = ", ".join(conflicted)
+                return (
+                    f"Applied {len(applied)} file(s), but conflicts occurred for: {conflict_files}",
+                    True,
+                )
+            kept_count = len(applied) + len(already_present)
+            return (f"Kept fix-agent changes in {kept_count} file(s).", False)
+
+        if prompt_yes_no(
+            "Retry with a modification instruction?",
+            colorful=colorful,
+            default_yes=True,
+        ):
+            retry_instruction = read_single_line("New Instruction: ", colorful=colorful)
+            if retry_instruction:
+                current_instruction = merge_instruction(
+                    current_instruction, retry_instruction
+                )
+                attempt += 1
+                continue
+            return ("Empty retry instruction; discarded changes.", False)
+
+        return ("Discarded fix-agent changes for this thread.", False)
+
+
+def _run_thread_fix_workflow(
+    repo_root: Path,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    thread: CommentThread,
+    all_threads: list[CommentThread],
+    model: str,
+    *,
+    colorful: bool,
+) -> tuple[str, bool]:
+    ask_ai_suggestion = prompt_yes_no(
+        "Do you want an AI suggestion before applying a fix?",
+        colorful=colorful,
+        default_yes=False,
+    )
+
+    suggested_fix: Optional[str] = None
+    initial_instruction: Optional[str] = None
+
+    if ask_ai_suggestion:
+        print()
+        print(
+            style(
+                "Running AI suggestion (Read/Glob/Grep in repo; no writes)…",
+                Ansi.DIM,
+                Ansi.FG_WHITE,
+                enabled=colorful,
+            )
+        )
+        sys.stdout.flush()
+        try:
+            suggested_fix, cost = asyncio.run(
+                suggest_fix_for_thread_async(
+                    repo_root,
+                    owner,
+                    repo,
+                    pr_number,
+                    thread,
+                    all_threads,
+                    model,
+                )
+            )
+        except Exception as exc:
+            return (str(exc), True)
+
+        _show_suggestion_screen(thread, suggested_fix, cost, colorful=colorful)
+        print()
+        initial_instruction = read_single_line(
+            "Optional extra instruction for the fix agent (Enter to skip): ",
+            colorful=colorful,
+        )
+    else:
+        print()
+        initial_instruction = read_single_line(
+            "Instruction for the fix agent (required): ",
+            colorful=colorful,
+        )
+        if not initial_instruction:
+            return ("Fix flow cancelled (no instruction provided).", False)
+
+    return _run_fix_agent_flow(
+        repo_root,
+        owner,
+        repo,
+        pr_number,
+        thread,
+        all_threads,
+        model,
+        suggested_fix,
+        initial_instruction,
+        colorful=colorful,
+    )
 
 
 def run_viewer(
@@ -491,56 +815,17 @@ def run_viewer(
         if key in ("f", "fix"):
             if use_tty_keys:
                 print()
-            if not prompt_yes_no(
-                "Do you want an AI suggestion?",
-                colorful=colorful,
-                default_yes=False,
-            ):
-                continue
             thread = threads[index]
-            print()
-            print(
-                style(
-                    "Running AI suggestion (Read/Glob/Grep in repo; no writes)…",
-                    Ansi.DIM,
-                    Ansi.FG_WHITE,
-                    enabled=colorful,
-                )
+            status_message, status_is_error = _run_thread_fix_workflow(
+                repo_root,
+                owner,
+                repo,
+                pr_number,
+                thread,
+                threads,
+                model,
+                colorful=colorful,
             )
-            sys.stdout.flush()
-            try:
-                text, cost = asyncio.run(
-                    suggest_fix_for_thread_async(
-                        repo_root,
-                        owner,
-                        repo,
-                        pr_number,
-                        thread,
-                        threads,
-                        model,
-                    )
-                )
-            except Exception as exc:
-                status_message = str(exc)
-                status_is_error = True
-                continue
-
-            clear_screen()
-            w = max(40, get_terminal_size(fallback=(120, 40)).columns - 2)
-            title = " AI suggested fix "
-            print(style(title.ljust(w), Ansi.BG_NAVY, Ansi.FG_YELLOW, Ansi.BOLD, enabled=colorful))
-            if cost is not None:
-                print(style(f"Estimated cost: ${cost:.4f}", Ansi.DIM, enabled=colorful))
-            print()
-            for line in text.splitlines():
-                for wrapped in wrap_lines(line, width=w) if line else [""]:
-                    print(style(wrapped, Ansi.FG_WHITE, enabled=colorful))
-            print()
-            print(style("Press Enter to return…", Ansi.DIM, enabled=colorful), end=" ")
-            try:
-                input()
-            except (EOFError, KeyboardInterrupt):
-                print()
             continue
 
         if key in ("d", "done"):

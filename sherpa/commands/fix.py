@@ -25,6 +25,7 @@ from sherpa.review_store import (
     parse_interactive_selection,
     parse_issue_id_args,
 )
+from sherpa.utils import AUTO_RETRY_NO_CHANGE_INSTRUCTION, merge_instruction
 
 MAX_CONCURRENT_FIXES = 4
 
@@ -520,6 +521,7 @@ async def _run_fixes_parallel(
                 session_id = f"fix-{issue.name}-{uuid.uuid4().hex[:8]}"
                 total_issue_cost = 0.0
                 attempt = 1
+                auto_retry_for_no_changes_used = False
                 final_changed_paths: list[str] = []
                 final_after_snapshot: dict[str, Optional[bytes]] = {}
 
@@ -539,6 +541,16 @@ async def _run_fixes_parallel(
                         changed_paths, after_snapshot = _capture_issue_delta(workspace_root, baseline_snapshot)
                         final_changed_paths = changed_paths
                         final_after_snapshot = after_snapshot
+
+                        if not changed_paths and not auto_retry_for_no_changes_used:
+                            auto_retry_for_no_changes_used = True
+                            _materialize_snapshot(workspace_root, baseline_snapshot)
+                            issue_instruction = merge_instruction(
+                                issue_instruction,
+                                AUTO_RETRY_NO_CHANGE_INSTRUCTION,
+                            )
+                            attempt += 1
+                            continue
 
                         action = "keep"
                         next_instruction: Optional[str] = None

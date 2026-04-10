@@ -37,3 +37,24 @@ def extract_commit_message(args: list[str]) -> Optional[str]:
                 return None
             else:
                 return str(args[i+1]).strip().replace(" ", "_")
+
+
+# Shared retry/instruction helpers for fix flows
+AUTO_RETRY_NO_CHANGE_INSTRUCTION = (
+    "Your previous attempt produced no filesystem changes. Retry now by applying real "
+    "edits with write/edit tools. Do not return a hypothetical patch. If no code change "
+    "is needed, explicitly say that and do not claim completion."
+)
+
+
+def merge_instruction(current: Optional[str], new_instruction: Optional[str]) -> Optional[str]:
+    """Merge a new instruction into an existing instruction for fix retry flows."""
+    if new_instruction is None:
+        return current
+    if current is None:
+        return new_instruction
+    return (
+        f"{current}\n\n"
+        "Additional user instruction for the next attempt:\n"
+        f"{new_instruction}"
+    )

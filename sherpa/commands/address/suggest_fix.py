@@ -118,6 +118,59 @@ Keep the final suggestion focused on resolving **this** thread.
 """
 
 
+def build_address_apply_prompt(
+    repo_root: Path,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    thread: CommentThread,
+    all_threads: list[CommentThread],
+    suggested_fix: Optional[str],
+    user_instruction: Optional[str],
+) -> str:
+    snippet = "\n".join(_thread_snippet_for_prompt(repo_root, thread))
+    transcript = _format_thread_transcript(thread)
+    others = _other_threads_summary(thread, all_threads)
+    suggestion_block = suggested_fix.strip() if suggested_fix and suggested_fix.strip() else "(none)"
+    instruction_block = (
+        user_instruction.strip() if user_instruction and user_instruction.strip() else "(none)"
+    )
+
+    return f"""\
+You are an autonomous coding agent working in a git repository checkout.
+Implement a concrete fix for one GitHub pull request review thread.
+
+Repository root (your cwd): {repo_root}
+Pull request: {owner}/{repo}#{pr_number}
+
+## Comment anchor + local snippet
+```
+{snippet}
+```
+
+## This thread (full conversation)
+{transcript}
+
+## Other threads on this PR (titles only)
+{others}
+
+## AI suggested fix (advisory, optional)
+{suggestion_block}
+
+## User instruction (optional)
+{instruction_block}
+
+## Requirements
+1. Make code changes directly in the working tree to resolve this thread.
+2. Keep scope tight: do not refactor unrelated code.
+3. If needed, update/add focused tests related to this fix.
+4. If AI suggestion and user instruction conflict, prioritize user instruction.
+5. Do not only describe a patch; apply real file edits.
+6. Never claim a file change unless it was written in this workspace.
+7. Finish with a concise completion note describing what changed and why.
+"""
+
+
 async def suggest_fix_for_thread_async(
     repo_root: Path,
     owner: str,
@@ -158,6 +211,60 @@ async def suggest_fix_for_thread_async(
     if not out:
         out = "(No suggestion text was returned.)"
     return out, total_cost_usd
+
+
+async def apply_fix_for_thread_async(
+    repo_root: Path,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    thread: CommentThread,
+    all_threads: list[CommentThread],
+    suggested_fix: Optional[str],
+    user_instruction: Optional[str],
+    model: str,
+) -> tuple[Optional[float], Optional[str]]:
+    prompt = build_address_apply_prompt(
+        repo_root,
+        owner,
+        repo,
+        pr_number,
+        thread,
+        all_threads,
+        suggested_fix,
+        user_instruction,
+    )
+    options = AgentOptions(
+        cwd=repo_root,
+        model=model,
+        allowed_tools=["Read", "Write", "Edit", "Glob", "Grep"],
+        instructions=(
+            "Before writing, inspect relevant files and callers for context. "
+            "Keep the fix minimal and constrained to resolving this review thread. "
+            "Use write/edit tools to apply real changes, and never report hypothetical edits."
+        ),
+        max_turns=40,
+    )
+
+    completion_text: Optional[str] = None
+    streamed_text = ""
+    total_cost_usd: Optional[float] = None
+    async for message in query(prompt=prompt, options=options):
+        if isinstance(message, AgentText):
+            streamed_text += message.text + "\n"
+        elif isinstance(message, AgentQueryCompleted):
+            if isinstance(message.message, str) and message.message.strip():
+                completion_text = message.message.strip()
+            elif streamed_text.strip():
+                completion_text = streamed_text.strip()
+
+            raw_cost: Any = message.extra.get("total_cost_usd")
+            if isinstance(raw_cost, int | float):
+                total_cost_usd = float(raw_cost)
+            elif isinstance(message.total_cost_usd, int | float):
+                total_cost_usd = float(message.total_cost_usd)
+
+    return total_cost_usd, completion_text
 
 
 def suggest_fix_for_thread(

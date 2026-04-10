@@ -25,6 +25,7 @@ class ReviewEntry:
 
 @dataclass
 class CommentEntry(ReviewEntry):
+    id: int
     code_location: CodeLocation
 
 @dataclass
