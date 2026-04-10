@@ -6,14 +6,16 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Callable, Optional
 
-from agnos import AgentOptions, AgentQueryCompleted, query
+from agnos import AgentOptions, AgentQueryCompleted
+from agnos.client import AgnosClient
 
 from sherpa.commands.base import Command
 from sherpa.commands.review import Issue, ReviewResult
-from sherpa.git import create_detached_worktree, get_git_repo_root, remove_worktree
+from sherpa.git import create_detached_worktree, remove_worktree
 from sherpa.prompts.fix_issue import get_fix_issue_prompt
 from sherpa.review_store import (
     StoredReview,
@@ -439,11 +441,12 @@ def _apply_issue_delta_to_main(
     return applied, already_present, conflicted
 
 
-async def _run_fix_agent(
+async def _run_fix_agent_turn(
+    client: AgnosClient,
+    session_id: str,
     workspace_root: Path,
     issue: Issue,
     stored: StoredReview,
-    model: str,
     extra_instruction: Optional[str],
 ) -> Optional[float]:
     prompt = get_fix_issue_prompt(
@@ -453,18 +456,8 @@ async def _run_fix_agent(
         stored.git_diff,
         extra_instruction=extra_instruction,
     )
-    options = AgentOptions(
-        cwd=workspace_root,
-        model=model,
-        allowed_tools=["Read", "Write", "Edit", "Glob", "Grep"],
-        instructions=(
-            "Before implementing the fix, inspect potentially impacted files "
-            "(for example nearby callers, shared helpers, and related tests) "
-            "to confirm context and avoid regressions."
-        ),
-    )
     total_cost_usd: Optional[float] = None
-    async for message in query(prompt=prompt, options=options):
+    async for message in client.query_streamed(prompt, session_id=session_id):
         if isinstance(message, AgentQueryCompleted):
             raw_cost = message.total_cost_usd
             if isinstance(raw_cost, int | float):
@@ -482,8 +475,8 @@ async def _run_fixes_parallel(
     progress_cb: Optional[Callable[[str, str], None]] = None,
     done_cb: Optional[
         Callable[
-            [str, Optional[float], Optional[Exception], list[str], dict[str, Optional[bytes]]],
-            None,
+            [str, int, Optional[float], Optional[Exception], list[str], dict[str, Optional[bytes]]],
+            tuple[str, Optional[str]],
         ]
     ] = None,
 ) -> tuple[
@@ -510,18 +503,72 @@ async def _run_fixes_parallel(
                 issue_instruction = None
                 if extra_instruction_by_issue is not None:
                     issue_instruction = extra_instruction_by_issue.get(issue.name)
-                cost = await _run_fix_agent(workspace_root, issue, stored, model, issue_instruction)
-                changed_paths, after_snapshot = _capture_issue_delta(workspace_root, baseline_snapshot)
+
+                options = AgentOptions(
+                    cwd=workspace_root,
+                    model=model,
+                    allowed_tools=["Read", "Write", "Edit", "Glob", "Grep"],
+                    instructions=(
+                        "Before implementing the fix, inspect potentially impacted files "
+                        "(for example nearby callers, shared helpers, and related tests) "
+                        "to confirm context and avoid regressions."
+                    ),
+                )
+                session_id = f"fix-{issue.name}-{uuid.uuid4().hex[:8]}"
+                total_issue_cost = 0.0
+                attempt = 1
+                final_changed_paths: list[str] = []
+                final_after_snapshot: dict[str, Optional[bytes]] = {}
+
+                async with AgnosClient(options) as client:
+                    while True:
+                        attempt_cost = await _run_fix_agent_turn(
+                            client,
+                            session_id,
+                            workspace_root,
+                            issue,
+                            stored,
+                            issue_instruction,
+                        )
+                        if isinstance(attempt_cost, (int, float)):
+                            total_issue_cost += float(attempt_cost)
+
+                        changed_paths, after_snapshot = _capture_issue_delta(workspace_root, baseline_snapshot)
+                        final_changed_paths = changed_paths
+                        final_after_snapshot = after_snapshot
+
+                        action = "keep"
+                        next_instruction: Optional[str] = None
+                        if done_cb is not None:
+                            action, next_instruction = done_cb(
+                                issue.name,
+                                attempt,
+                                attempt_cost,
+                                None,
+                                changed_paths,
+                                after_snapshot,
+                            )
+
+                        if action == "retry":
+                            _materialize_snapshot(workspace_root, baseline_snapshot)
+                            issue_instruction = next_instruction
+                            attempt += 1
+                            continue
+
+                        if action == "discard":
+                            final_changed_paths = []
+                            final_after_snapshot = {}
+                        break
+
+                final_cost: Optional[float] = total_issue_cost
                 if progress_cb is not None:
                     progress_cb(issue.name, "finished")
-                if done_cb is not None:
-                    done_cb(issue.name, cost, None, changed_paths, after_snapshot)
-                return issue.name, cost, None, changed_paths, after_snapshot
+                return issue.name, final_cost, None, final_changed_paths, final_after_snapshot
             except Exception as e:
                 if progress_cb is not None:
                     progress_cb(issue.name, "failed")
                 if done_cb is not None:
-                    done_cb(issue.name, None, e, [], {})
+                    done_cb(issue.name, 1, None, e, [], {})
                 return issue.name, None, e, [], {}
             finally:
                 if workspace_root is not None:
@@ -535,12 +582,12 @@ async def _run_fixes_parallel(
     return list(results), total
 
 
-def _prompt_extra_instruction() -> Optional[str]:
+def _prompt_extra_instruction(prompt_text: str = "Extra Instruction: ") -> Optional[str]:
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         return None
 
     try:
-        raw = _input_with_colored_typing("Extra Instruction: ").strip()
+        raw = _input_with_colored_typing(prompt_text).strip()
     except EOFError:
         return None
     return raw or None
@@ -726,21 +773,33 @@ class FixCommand(Command):
 
         def on_done(
             issue_name: str,
+            attempt: int,
             _cost: Optional[float],
             err: Optional[Exception],
             changed_paths: list[str],
             after_snapshot: dict[str, Optional[bytes]],
-        ) -> None:
-            def render_issue() -> None:
+        ) -> tuple[str, Optional[str]]:
+            def render_issue() -> tuple[str, Optional[str]]:
                 print()
-                print(_colorize_bold(f"=== Fix: [{issue_name}] ===", CYAN))
+                print(_colorize_bold(f"=== Fix: [{issue_name}] (attempt {attempt}) ===", CYAN))
                 if err is not None:
                     print(_colorize_bold(f"[sherpa] Error in [{issue_name}]: {err}", RED), file=sys.stderr)
-                    return
+                    return ("discard", None)
 
                 if not changed_paths:
                     print(_colorize(f"[sherpa] [{issue_name}] no changes detected.", YELLOW))
-                    return
+                    if _prompt_yes_no(
+                        _colorize_bold(
+                            f"[sherpa] Retry [{issue_name}] with a new instruction in the same agent session?",
+                            YELLOW,
+                        ),
+                        default_yes=True,
+                    ):
+                        retry_instruction = _prompt_extra_instruction("New Instruction: ")
+                        if retry_instruction:
+                            return ("retry", retry_instruction)
+                        print(_colorize("[sherpa] Empty instruction; discarding this attempt.", YELLOW))
+                    return ("discard", None)
 
                 for rel_path in changed_paths:
                     _print_single_file_diff(
@@ -789,11 +848,49 @@ class FixCommand(Command):
                             ),
                             file=sys.stderr,
                         )
-                    return
+                    return ("keep", None)
+
+                if _prompt_yes_no(
+                    _colorize_bold(
+                        f"[sherpa] Retry [{issue_name}] with a new instruction in the same agent session?",
+                        YELLOW,
+                    ),
+                    default_yes=True,
+                ):
+                    retry_instruction = _prompt_extra_instruction("New Instruction: ")
+                    if retry_instruction:
+                        print(_colorize("[sherpa] Retrying with your instruction...", CYAN))
+                        return ("retry", retry_instruction)
+                    print(_colorize("[sherpa] Empty instruction; discarding this attempt.", YELLOW))
 
                 print(_colorize_bold(f"[sherpa] Discarded changes for [{issue_name}].", YELLOW))
+                return ("discard", None)
 
-            display.run_section(render_issue)
+            return render_issue()
+
+        def on_done_wrapped(
+            issue_name: str,
+            attempt: int,
+            cost: Optional[float],
+            err: Optional[Exception],
+            changed_paths: list[str],
+            after_snapshot: dict[str, Optional[bytes]],
+        ) -> tuple[str, Optional[str]]:
+            decision: tuple[str, Optional[str]] = ("discard", None)
+
+            def run_and_capture() -> None:
+                nonlocal decision
+                decision = on_done(
+                    issue_name,
+                    attempt,
+                    cost,
+                    err,
+                    changed_paths,
+                    after_snapshot,
+                )
+
+            display.run_section(run_and_capture)
+            return decision
 
         results, aggregate_cost = asyncio.run(
             _run_fixes_parallel(
@@ -804,7 +901,7 @@ class FixCommand(Command):
                 model,
                 extra_instruction_by_issue=extra_instruction_by_issue,
                 progress_cb=on_progress,
-                done_cb=on_done,
+                done_cb=on_done_wrapped,
             )
         )
         display.stop_live_refresh()
