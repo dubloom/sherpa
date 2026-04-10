@@ -46,5 +46,4 @@ Staged diff at review time (may differ from current working tree):
 
 Requirements:
 - Prefer changing `{issue.file}` unless the issue is clearly elsewhere.
-- After edits, briefly summarize what you changed and which files you touched.
 """

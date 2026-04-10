@@ -1,8 +1,10 @@
 import asyncio
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -11,7 +13,7 @@ from agnos import AgentOptions, AgentQueryCompleted, query
 
 from sherpa.commands.base import Command
 from sherpa.commands.review import Issue, ReviewResult
-from sherpa.git import get_git_repo_root
+from sherpa.git import create_detached_worktree, get_git_repo_root, remove_worktree
 from sherpa.prompts.fix_issue import get_fix_issue_prompt
 from sherpa.review_store import (
     StoredReview,
@@ -25,12 +27,19 @@ from sherpa.review_store import (
 MAX_CONCURRENT_FIXES = 4
 
 RESET = "\033[0m"
+BOLD = "\033[1m"
 RED = "\033[31m"
 GREEN = "\033[32m"
+YELLOW = "\033[33m"
+BLUE = "\033[34m"
 CYAN = "\033[36m"
 
 
 def _supports_color() -> bool:
+    if os.getenv("NO_COLOR"):
+        return False
+    if os.getenv("TERM", "").lower() == "dumb":
+        return False
     return sys.stdout.isatty()
 
 
@@ -38,6 +47,41 @@ def _colorize(text: str, color: str) -> str:
     if not _supports_color():
         return text
     return f"{color}{text}{RESET}"
+
+
+def _colorize_bold(text: str, color: str) -> str:
+    if not _supports_color():
+        return text
+    return f"{BOLD}{color}{text}{RESET}"
+
+
+def _status_badge(status: str) -> str:
+    normalized = status.strip().lower()
+    label = normalized.upper() if normalized else "UNKNOWN"
+    if normalized == "running":
+        return _colorize_bold(f"[{label}]", BLUE)
+    if normalized == "finished":
+        return _colorize_bold(f"[{label}]", GREEN)
+    if normalized == "failed":
+        return _colorize_bold(f"[{label}]", RED)
+    if normalized == "queued":
+        return _colorize_bold(f"[{label}]", YELLOW)
+    return f"[{label}]"
+
+
+def _input_with_colored_typing(
+    prompt: str,
+    prompt_color: str = CYAN,
+    input_color: str = GREEN,
+) -> str:
+    if not _supports_color() or not sys.stdin.isatty() or not sys.stdout.isatty():
+        return input(prompt)
+    try:
+        return input(f"{_colorize_bold(prompt, prompt_color)}{input_color}")
+    finally:
+        # Always reset terminal style even on EOF/interruption.
+        sys.stdout.write(RESET)
+        sys.stdout.flush()
 
 
 def _list_tracked_files(repo_root: Path) -> list[str]:
@@ -345,46 +389,72 @@ def _prompt_issue_checkboxes(issues: list[Issue]) -> Optional[list[Issue]]:
     return [issues[idx] for idx in sorted(selected)]
 
 
-def _revert_fix_changes(
+def _materialize_snapshot(
     repo_root: Path,
-    changed_tracked: list[str],
-    changed_untracked_existing: list[str],
-    created_untracked: list[str],
-    deleted_untracked: list[str],
-    tracked_before: dict[str, Optional[bytes]],
-    untracked_before: dict[str, Optional[bytes]],
+    snapshot: dict[str, Optional[bytes]],
 ) -> None:
-    for rel_path in changed_tracked:
-        _write_bytes(repo_root / rel_path, tracked_before.get(rel_path))
+    for rel_path, content in snapshot.items():
+        _write_bytes(repo_root / rel_path, content)
 
-    for rel_path in changed_untracked_existing:
-        _write_bytes(repo_root / rel_path, untracked_before.get(rel_path))
 
-    for rel_path in deleted_untracked:
-        _write_bytes(repo_root / rel_path, untracked_before.get(rel_path))
+def _capture_issue_delta(
+    worktree_root: Path,
+    baseline_snapshot: dict[str, Optional[bytes]],
+) -> tuple[list[str], dict[str, Optional[bytes]]]:
+    untracked_after_paths = _list_untracked_files(worktree_root)
+    all_paths = sorted(set(baseline_snapshot.keys()) | set(untracked_after_paths))
+    before = {rel_path: baseline_snapshot.get(rel_path) for rel_path in all_paths}
+    after = _snapshot_files(worktree_root, all_paths)
+    changed_paths = _changed_files_between_snapshots(before, after)
+    return changed_paths, after
 
-    for rel_path in created_untracked:
-        path = repo_root / rel_path
-        if path.exists():
-            path.unlink()
+
+def _apply_issue_delta_to_main(
+    repo_root: Path,
+    changed_paths: list[str],
+    after_snapshot: dict[str, Optional[bytes]],
+    main_baseline: dict[str, Optional[bytes]],
+) -> tuple[list[str], list[str], list[str]]:
+    applied: list[str] = []
+    already_present: list[str] = []
+    conflicted: list[str] = []
+
+    for rel_path in changed_paths:
+        expected_before = main_baseline.get(rel_path)
+        current_bytes = _read_bytes(repo_root / rel_path)
+        desired_after = after_snapshot.get(rel_path)
+
+        if current_bytes != expected_before:
+            if current_bytes == desired_after:
+                already_present.append(rel_path)
+                main_baseline[rel_path] = current_bytes
+            else:
+                conflicted.append(rel_path)
+            continue
+
+        _write_bytes(repo_root / rel_path, desired_after)
+        main_baseline[rel_path] = desired_after
+        applied.append(rel_path)
+
+    return applied, already_present, conflicted
 
 
 async def _run_fix_agent(
-    repo_root: Path,
+    workspace_root: Path,
     issue: Issue,
     stored: StoredReview,
     model: str,
     extra_instruction: Optional[str],
 ) -> Optional[float]:
     prompt = get_fix_issue_prompt(
-        repo_root,
+        workspace_root,
         issue,
         stored.modified_files,
         stored.git_diff,
         extra_instruction=extra_instruction,
     )
     options = AgentOptions(
-        cwd=repo_root,
+        cwd=workspace_root,
         model=model,
         allowed_tools=["Read", "Write", "Edit", "Glob", "Grep"],
         instructions=(
@@ -396,7 +466,7 @@ async def _run_fix_agent(
     total_cost_usd: Optional[float] = None
     async for message in query(prompt=prompt, options=options):
         if isinstance(message, AgentQueryCompleted):
-            raw_cost = message.extra.get("total_cost_usd")
+            raw_cost = message.total_cost_usd
             if isinstance(raw_cost, int | float):
                 total_cost_usd = float(raw_cost)
     return total_cost_usd
@@ -405,42 +475,61 @@ async def _run_fix_agent(
 async def _run_fixes_parallel(
     repo_root: Path,
     stored: StoredReview,
+    baseline_snapshot: dict[str, Optional[bytes]],
     issues: list[Issue],
     model: str,
     extra_instruction_by_issue: Optional[dict[str, Optional[str]]] = None,
     progress_cb: Optional[Callable[[str, str], None]] = None,
-    done_cb: Optional[Callable[[str, Optional[float], Optional[Exception]], None]] = None,
-) -> tuple[list[tuple[str, Optional[float], Optional[Exception]]], float]:
+    done_cb: Optional[
+        Callable[
+            [str, Optional[float], Optional[Exception], list[str], dict[str, Optional[bytes]]],
+            None,
+        ]
+    ] = None,
+) -> tuple[
+    list[tuple[str, Optional[float], Optional[Exception], list[str], dict[str, Optional[bytes]]]],
+    float,
+]:
     if not issues:
         return [], 0.0
 
     n = len(issues)
     sem = asyncio.Semaphore(min(MAX_CONCURRENT_FIXES, max(1, n)))
 
-    async def one(issue: Issue) -> tuple[str, Optional[float], Optional[Exception]]:
+    async def one(
+        issue: Issue,
+    ) -> tuple[str, Optional[float], Optional[Exception], list[str], dict[str, Optional[bytes]]]:
         async with sem:
             if progress_cb is not None:
                 progress_cb(issue.name, "running")
+            workspace_root: Optional[Path] = None
             try:
+                workspace_root = create_detached_worktree(repo_root, issue.name)
+                _materialize_snapshot(workspace_root, baseline_snapshot)
+
                 issue_instruction = None
                 if extra_instruction_by_issue is not None:
                     issue_instruction = extra_instruction_by_issue.get(issue.name)
-                cost = await _run_fix_agent(repo_root, issue, stored, model, issue_instruction)
+                cost = await _run_fix_agent(workspace_root, issue, stored, model, issue_instruction)
+                changed_paths, after_snapshot = _capture_issue_delta(workspace_root, baseline_snapshot)
                 if progress_cb is not None:
                     progress_cb(issue.name, "finished")
                 if done_cb is not None:
-                    done_cb(issue.name, cost, None)
-                return issue.name, cost, None
+                    done_cb(issue.name, cost, None, changed_paths, after_snapshot)
+                return issue.name, cost, None, changed_paths, after_snapshot
             except Exception as e:
                 if progress_cb is not None:
                     progress_cb(issue.name, "failed")
                 if done_cb is not None:
-                    done_cb(issue.name, None, e)
-                return issue.name, None, e
+                    done_cb(issue.name, None, e, [], {})
+                return issue.name, None, e, [], {}
+            finally:
+                if workspace_root is not None:
+                    remove_worktree(repo_root, workspace_root)
 
     results = await asyncio.gather(*[one(iss) for iss in issues])
     total = 0.0
-    for _, cost, err in results:
+    for _, cost, err, _, _ in results:
         if err is None and isinstance(cost, (int, float)):
             total += float(cost)
     return list(results), total
@@ -451,7 +540,7 @@ def _prompt_extra_instruction() -> Optional[str]:
         return None
 
     try:
-        raw = input("Extra Instruction: ").strip()
+        raw = _input_with_colored_typing("Extra Instruction: ").strip()
     except EOFError:
         return None
     return raw or None
@@ -468,10 +557,110 @@ def _collect_extra_instructions(issues: list[Issue]) -> dict[str, Optional[str]]
     return instructions
 
 
+class _FixDisplayCoordinator:
+    def __init__(self, issues: list[Issue]):
+        self._issues = issues
+        self._statuses: dict[str, str] = {issue.name: "queued" for issue in issues}
+        self._started_at: dict[str, float] = {}
+        self._lock = threading.RLock()
+        self._tty = sys.stdout.isatty()
+        self._dashboard_visible = False
+        self._dashboard_paused = 0
+        self._last_plain_line: Optional[str] = None
+        self._stop_refresh = threading.Event()
+        self._refresh_thread: Optional[threading.Thread] = None
+
+    def _progress_line(self) -> str:
+        parts: list[str] = []
+        now = time.time()
+        for issue in self._issues:
+            st = self._statuses.get(issue.name, "queued")
+            label = f"{issue.name}:{_status_badge(st)}"
+            t0 = self._started_at.get(issue.name)
+            if t0 is not None and st in ("running", "finished", "failed"):
+                label += f"({int(now - t0)}s)"
+            parts.append(label)
+        return f"[sherpa] Progress: {' | '.join(parts)}"
+
+    def render_progress(self) -> None:
+        with self._lock:
+            line = self._progress_line()
+            if self._tty:
+                if self._dashboard_paused > 0:
+                    return
+                sys.stdout.write(f"\r\x1b[2K{line}")
+                sys.stdout.flush()
+                self._dashboard_visible = True
+                return
+
+            if line != self._last_plain_line:
+                print(line)
+                self._last_plain_line = line
+
+    def update_status(self, issue_name: str, new_status: str) -> None:
+        with self._lock:
+            self._statuses[issue_name] = new_status
+            if new_status == "running":
+                self._started_at[issue_name] = time.time()
+        self.render_progress()
+
+    def _clear_dashboard_line(self) -> None:
+        if self._tty and self._dashboard_visible:
+            sys.stdout.write("\r\x1b[2K")
+            sys.stdout.flush()
+            self._dashboard_visible = False
+
+    def _pause_dashboard(self) -> None:
+        self._dashboard_paused += 1
+        self._clear_dashboard_line()
+
+    def _resume_dashboard(self) -> None:
+        self._dashboard_paused = max(0, self._dashboard_paused - 1)
+        if self._dashboard_paused == 0:
+            self.render_progress()
+
+    def run_section(self, fn: Callable[[], None]) -> None:
+        with self._lock:
+            self._pause_dashboard()
+            try:
+                fn()
+            finally:
+                self._resume_dashboard()
+
+    def finalize(self) -> None:
+        with self._lock:
+            if self._tty and self._dashboard_visible:
+                print()
+                self._dashboard_visible = False
+
+    def start_live_refresh(self) -> None:
+        if not self._tty:
+            return
+        with self._lock:
+            if self._refresh_thread is not None:
+                return
+            self._stop_refresh.clear()
+            self._refresh_thread = threading.Thread(target=self._refresh_loop, daemon=True)
+            self._refresh_thread.start()
+
+    def stop_live_refresh(self) -> None:
+        with self._lock:
+            thread = self._refresh_thread
+            if thread is None:
+                return
+            self._refresh_thread = None
+            self._stop_refresh.set()
+        thread.join(timeout=2)
+
+    def _refresh_loop(self) -> None:
+        while not self._stop_refresh.wait(timeout=1.0):
+            self.render_progress()
+
+
 class FixCommand(Command):
     @staticmethod
-    def execute(args: list[str], model: str):
-        root = get_git_repo_root()
+    def execute(args: list[str], repo_root: Path, model: str):
+        root = repo_root
         stored = load_stored_review(root)
         if stored is None:
             print(
@@ -519,75 +708,98 @@ class FixCommand(Command):
 
         extra_instruction_by_issue = _collect_extra_instructions(issues_to_fix)
 
+        print(_colorize_bold("[sherpa] Fix Session", CYAN))
         print(f"[sherpa] Running fix agent(s) for: {', '.join(i.name for i in issues_to_fix)}")
-        statuses: dict[str, str] = {issue.name: "queued" for issue in issues_to_fix}
-        started_at: dict[str, float] = {}
-        issue_by_name = {issue.name: issue for issue in issues_to_fix}
-
-        def print_progress() -> None:
-            parts: list[str] = []
-            now = time.time()
-            for issue in issues_to_fix:
-                st = statuses.get(issue.name, "queued")
-                label = f"{issue.name}:{st}"
-                t0 = started_at.get(issue.name)
-                if t0 is not None and st in ("running", "finished", "failed"):
-                    label += f"({int(now - t0)}s)"
-                parts.append(label)
-            print(f"[sherpa] Progress: {' | '.join(parts)}")
+        display = _FixDisplayCoordinator(issues_to_fix)
 
         def on_progress(issue_name: str, new_status: str) -> None:
-            statuses[issue_name] = new_status
-            if new_status == "running":
-                started_at[issue_name] = time.time()
-            print_progress()
+            display.update_status(issue_name, new_status)
 
-        print_progress()
+        display.render_progress()
+        display.start_live_refresh()
         tracked_files = _list_tracked_files(root)
         untracked_before_paths = _list_untracked_files(root)
         tracked_before = _snapshot_files(root, tracked_files)
         untracked_before = _snapshot_files(root, untracked_before_paths)
-        file_baseline: dict[str, Optional[bytes]] = {**tracked_before, **untracked_before}
-        reviewed_files: set[str] = set()
+        run_baseline: dict[str, Optional[bytes]] = {**tracked_before, **untracked_before}
+        main_baseline: dict[str, Optional[bytes]] = dict(run_baseline)
 
-        def on_done(issue_name: str, _cost: Optional[float], err: Optional[Exception]) -> None:
-            print()
-            print(f"=== Fix: [{issue_name}] ===")
-            if err is not None:
-                print(f"[sherpa] Error: {err}", file=sys.stderr)
-                return
+        def on_done(
+            issue_name: str,
+            _cost: Optional[float],
+            err: Optional[Exception],
+            changed_paths: list[str],
+            after_snapshot: dict[str, Optional[bytes]],
+        ) -> None:
+            def render_issue() -> None:
+                print()
+                print(_colorize_bold(f"=== Fix: [{issue_name}] ===", CYAN))
+                if err is not None:
+                    print(_colorize_bold(f"[sherpa] Error in [{issue_name}]: {err}", RED), file=sys.stderr)
+                    return
 
-            issue = issue_by_name.get(issue_name)
-            if issue is None:
-                print("(issue metadata unavailable)")
-                return
+                if not changed_paths:
+                    print(_colorize(f"[sherpa] [{issue_name}] no changes detected.", YELLOW))
+                    return
 
-            target = issue.file.strip()
-            if not target:
-                print("(no target file declared for this issue)")
-                return
+                for rel_path in changed_paths:
+                    _print_single_file_diff(
+                        rel_path,
+                        run_baseline.get(rel_path),
+                        after_snapshot.get(rel_path),
+                    )
 
-            before_bytes = file_baseline.get(target)
-            after_bytes = _read_bytes(root / target)
-            if before_bytes == after_bytes:
-                print(f"(no direct change detected on target file: {target})")
-                return
+                print(
+                    _colorize(
+                        f"[sherpa] [{issue_name}] changed {len(changed_paths)} file(s).",
+                        CYAN,
+                    )
+                )
+                if _prompt_yes_no(
+                    _colorize_bold(f"[sherpa] Keep changes for [{issue_name}]?", YELLOW),
+                    default_yes=True,
+                ):
+                    applied, already_present, conflicted = _apply_issue_delta_to_main(
+                        root,
+                        changed_paths,
+                        after_snapshot,
+                        main_baseline,
+                    )
+                    if applied:
+                        print(
+                            _colorize_bold(
+                                f"[sherpa] Applied {len(applied)} file(s) for [{issue_name}].",
+                                GREEN,
+                            )
+                        )
+                    if already_present:
+                        print(
+                            _colorize(
+                                f"[sherpa] {len(already_present)} file(s) already matched desired content "
+                                f"for [{issue_name}].",
+                                YELLOW,
+                            )
+                        )
+                    if conflicted:
+                        print(
+                            _colorize_bold(
+                                f"[sherpa] Conflict while applying [{issue_name}] for: "
+                                f"{', '.join(conflicted)}",
+                                RED,
+                            ),
+                            file=sys.stderr,
+                        )
+                    return
 
-            _print_single_file_diff(target, before_bytes, after_bytes)
-            reviewed_files.add(target)
+                print(_colorize_bold(f"[sherpa] Discarded changes for [{issue_name}].", YELLOW))
 
-            if _prompt_yes_no(f"[sherpa] Keep changes for [{issue_name}]?", default_yes=True):
-                file_baseline[target] = after_bytes
-                return
-
-            _write_bytes(root / target, before_bytes)
-            file_baseline[target] = _read_bytes(root / target)
-            print(f"[sherpa] Reverted changes for [{issue_name}].")
+            display.run_section(render_issue)
 
         results, aggregate_cost = asyncio.run(
             _run_fixes_parallel(
                 root,
                 stored,
+                run_baseline,
                 issues_to_fix,
                 model,
                 extra_instruction_by_issue=extra_instruction_by_issue,
@@ -595,48 +807,9 @@ class FixCommand(Command):
                 done_cb=on_done,
             )
         )
+        display.stop_live_refresh()
 
-        tracked_after = _snapshot_files(root, tracked_files)
-        untracked_after_paths = _list_untracked_files(root)
-        untracked_after = _snapshot_files(root, untracked_after_paths)
-
-        changed_tracked_files = _changed_files_between_snapshots(tracked_before, tracked_after)
-        changed_untracked_existing = [
-            rel_path
-            for rel_path in untracked_before_paths
-            if rel_path in untracked_after and untracked_before.get(rel_path) != untracked_after.get(rel_path)
-        ]
-        new_untracked_files = sorted(set(untracked_after_paths) - set(untracked_before_paths))
-        deleted_untracked_files = sorted(set(untracked_before_paths) - set(untracked_after_paths))
-        changed_files = sorted(
-            set(changed_tracked_files)
-            | set(changed_untracked_existing)
-            | set(new_untracked_files)
-            | set(deleted_untracked_files)
-        )
-
-        ok = sum(1 for _, _, err in results if err is None)
-        failed = len(results) - ok
-
-        residual_files = [p for p in changed_files if p not in reviewed_files]
-        if residual_files and not _prompt_yes_no(
-            "[sherpa] Keep remaining unmapped changes?",
-            default_yes=True,
-        ):
-            _revert_fix_changes(
-                root,
-                changed_tracked_files,
-                changed_untracked_existing,
-                new_untracked_files,
-                deleted_untracked_files,
-                tracked_before,
-                untracked_before,
-            )
-            print("[sherpa] Reverted changes made during this fix run.")
-
+        display.finalize()
         print()
-        print(
-            f"[sherpa] Fix run finished: {ok} succeeded, {failed} failed; "
-            f"total cost: {aggregate_cost}$"
-        )
+        print(f"[sherpa] Total cost: {_colorize_bold(f'{aggregate_cost}$', CYAN)}")
         print("[sherpa] Review and stage changes before committing.")
