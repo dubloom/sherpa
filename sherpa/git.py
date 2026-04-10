@@ -68,6 +68,58 @@ def get_staged_changes(root: Path) -> tuple[Optional[str], [str]]:
     return modified_files, diff
 
 
+def _git_ref_exists(root: Path, ref: str) -> bool:
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", ref],
+        cwd=root,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def resolve_main_or_master(root: Path) -> Optional[str]:
+    for branch in ("main", "master"):
+        if _git_ref_exists(root, branch):
+            return branch
+
+    for branch in ("main", "master"):
+        remote_branch = f"origin/{branch}"
+        if _git_ref_exists(root, remote_branch):
+            return remote_branch
+
+    return None
+
+
+def get_branch_changes(root: Path, branch: str = "HEAD") -> tuple[Optional[str], Optional[str], Optional[str]]:
+    base_branch = resolve_main_or_master(root)
+    if not base_branch:
+        print("[sherpa][warning] Could not resolve base branch (main/master).")
+        return None, None, None
+
+    diff_range = f"{base_branch}...{branch}"
+    modified_files = execute_git_command(
+        ["diff", "--name-only", diff_range],
+        cwd=root,
+        warning_message=f"Could not retrieve the list of modified files for {diff_range}",
+    )
+
+    diff = execute_git_command(
+        [
+            "diff",
+            "--patch",
+            "--no-color",
+            "--no-ext-diff",
+            "--minimal",
+            diff_range,
+        ],
+        cwd=root,
+        warning_message=f"Could not retrieve git diff for {diff_range}",
+    )
+    return modified_files, diff, base_branch
+
+
 #TODO: Review what is below
 def _sanitize_worktree_label(label: str) -> str:
     sanitized = "".join(ch if (ch.isalnum() or ch in ("-", "_")) else "-" for ch in label)

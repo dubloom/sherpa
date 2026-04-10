@@ -7,7 +7,7 @@ from typing import Literal, Optional
 from agnos import AgentOptions, AgentQueryCompleted, AgentText, query
 from sherpa.commands.base import Command
 from sherpa.commands.review.report import render_review_report
-from sherpa.git import get_staged_changes
+from sherpa.git import get_branch_changes, get_staged_changes
 from sherpa.prompts.review import get_review_prompt
 from sherpa.utils import extract_commit_message
 
@@ -81,11 +81,26 @@ class ReviewCommand(Command):
         # Local import to avoid circular import at module initialization time.
         from sherpa.review_store import save_review
 
-        print("[sherpa] Reviewing staged changes")
         commit_message = extract_commit_message(args)
-        modified_files, git_diff = get_staged_changes(repo_root)
+        branch_mode = "--branch" in args
+        modified_files: Optional[str] = None
+        git_diff: Optional[str] = None
+
+        if branch_mode:
+            modified_files, git_diff, base_branch = get_branch_changes(repo_root)
+            if not base_branch:
+                print("[sherpa] Could not find main/master base branch, exiting...")
+                return
+            print(f"[sherpa] Reviewing current branch changes against {base_branch}")
+        else:
+            print("[sherpa] Reviewing staged changes")
+            modified_files, git_diff = get_staged_changes(repo_root)
+
         if not modified_files and not git_diff:
-            print("[sherpa] It seems you don't have any staged changes, exiting...")
+            if branch_mode:
+                print("[sherpa] No changes found between current branch and base branch, exiting...")
+            else:
+                print("[sherpa] It seems you don't have any staged changes, exiting...")
             return
 
         review_result, total_cost = asyncio.run(
