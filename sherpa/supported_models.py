@@ -5,5 +5,3 @@ SUPPORTED_MODEL = [
     "gpt-5.3-codex",
     "gpt-5.1-codex-mini"
 ]
-
-DEFAULT_MODEL = "gpt-5.3-codex"

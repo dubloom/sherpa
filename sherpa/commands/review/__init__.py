@@ -5,10 +5,11 @@ from pathlib import Path
 import re
 import time
 from typing import Literal, Optional
-from agnos import AgentOptions, AgentQueryCompleted, AgentText, AgentToolCall, AgentToolResult, query
+from agnos import AgentOptions, AgentQueryCompleted, AgentText, AgentToolCall, query
 from agnos.messages import AgentThinking
 from sherpa.commands.base import Command
 from sherpa.commands.review.report import render_review_report
+from sherpa.config import SherpaConfig
 from sherpa.git import get_branch_changes, get_staged_changes
 from sherpa.prompts.review import get_review_prompt
 from sherpa.utils import extract_commit_message
@@ -149,7 +150,7 @@ def _extract_json_review_payload(review_text: str) -> Optional[dict]:
 
 class ReviewCommand(Command):
     @staticmethod
-    def execute(args: list[str], repo_root: Path, model: str):
+    def execute(args: list[str], repo_root: Path, config: SherpaConfig):
         # Local import to avoid circular import at module initialization time.
         from sherpa.review_store import save_review
 
@@ -176,7 +177,14 @@ class ReviewCommand(Command):
             return
 
         review_result, total_cost = asyncio.run(
-            ReviewCommand.review(repo_root, commit_message, modified_files, git_diff, model)
+            ReviewCommand.review(
+                repo_root,
+                commit_message,
+                modified_files,
+                git_diff,
+                config.default_model,
+                config.default_reasoning_effort,
+            )
         )
         if isinstance(review_result, ReviewResult):
             save_review(repo_root, commit_message, modified_files, git_diff, review_result, None)
@@ -210,6 +218,7 @@ class ReviewCommand(Command):
         modified_files: str,
         git_diff: str,
         model: str,
+        reasoning_effort: str,
     ):
         prompt = get_review_prompt(repo_root, modified_files, git_diff)
         options = AgentOptions(
@@ -228,7 +237,7 @@ class ReviewCommand(Command):
                 "a practical fix. Keep the review concise, high-signal, and strictly compliant with the "
                 "requested JSON schema."
             ),
-            reasoning_effort="medium",
+            reasoning_effort=reasoning_effort,
             reasoning_summary="auto",
             max_turns=50
         )

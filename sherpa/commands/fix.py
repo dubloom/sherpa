@@ -15,6 +15,7 @@ from agnos.client import AgnosClient
 
 from sherpa.commands.base import Command
 from sherpa.commands.review import Issue, ReviewResult
+from sherpa.config import SherpaConfig
 from sherpa.git import create_detached_worktree, remove_worktree
 from sherpa.prompts.fix_issue import get_fix_issue_prompt
 from sherpa.review_store import (
@@ -722,7 +723,7 @@ class _FixDisplayCoordinator:
 
 class FixCommand(Command):
     @staticmethod
-    def execute(args: list[str], repo_root: Path, model: str):
+    def execute(args: list[str], repo_root: Path, config: SherpaConfig):
         root = repo_root
         stored = load_stored_review(root)
         if stored is None:
@@ -920,7 +921,7 @@ class FixCommand(Command):
                 stored,
                 run_baseline,
                 issues_to_fix,
-                model,
+                config.default_model,
                 extra_instruction_by_issue=extra_instruction_by_issue,
                 progress_cb=on_progress,
                 done_cb=on_done_wrapped,

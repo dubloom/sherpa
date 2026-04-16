@@ -5,13 +5,14 @@ import subprocess
 from sherpa.commands.base import Command
 from sherpa.commands.review import ReviewCommand, ReviewResult
 from sherpa.commands.review.report import render_review_report
-from sherpa.git import get_git_repo_root, get_staged_changes
+from sherpa.config import SherpaConfig
+from sherpa.git import get_staged_changes
 from sherpa.review_store import save_review
 from sherpa.utils import extract_commit_message
 
 class CommitCommand(Command):
     @staticmethod
-    def execute(args: list[str], repo_root: Path, model: str):
+    def execute(args: list[str], repo_root: Path, config: SherpaConfig):
         print("[sherpa] Reviewing staged changes")
 
         commit_message = extract_commit_message(args)
@@ -20,7 +21,16 @@ class CommitCommand(Command):
             print("[sherpa] It seems you don't have any staged changes, exiting...")
             return
 
-        review_result, total_cost = asyncio.run(ReviewCommand.review(repo_root, commit_message, modified_files, git_diff, model))
+        review_result, total_cost = asyncio.run(
+            ReviewCommand.review(
+                repo_root,
+                commit_message,
+                modified_files,
+                git_diff,
+                config.default_model,
+                config.default_reasoning_effort,
+            )
+        )
         if isinstance(review_result, ReviewResult):
             save_review(repo_root, commit_message, modified_files, git_diff, review_result, None)
         else:

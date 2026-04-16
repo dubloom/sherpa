@@ -6,6 +6,7 @@ from typing import Union
 
 from sherpa.commands.address.git import build_github_headers, get_comments_and_reviews, infer_pr_info
 from sherpa.commands.base import Command
+from sherpa.config import SherpaConfig
 
 @dataclass
 class CodeLocation:
@@ -99,7 +100,7 @@ def build_threads(comments):
 
 class AddressCommand(Command):
     @staticmethod
-    def execute(args: list[str], repo_root: Path, model: str):
+    def execute(args: list[str], repo_root: Path, config: SherpaConfig):
         build_github_headers()
 
         owner: str | None = None
@@ -129,4 +130,4 @@ class AddressCommand(Command):
 
         from .interface import run_viewer
 
-        run_viewer(threads, repo_root, owner, repo, pr_number, model=model)
+        run_viewer(threads, repo_root, owner, repo, pr_number, model=config.default_model)

@@ -27,7 +27,17 @@ You can specify the model you want to use for your review using the `--model` fl
 sherpa commit --model claude-opus-4-5 -m "my commit message"
 ```
 
-Only claude model are supported for now.
+If `--model` is not provided, sherpa uses `.sherpa/config.json`:
+
+```json
+{
+  "default_model": "gpt-5.3-codex",
+  "default_reasoning_effort": "medium"
+}
+```
+
+`default_reasoning_effort` controls the review reasoning effort and must be one of:
+`low`, `medium`, or `high`.
 
 The review will contain four potential categories of feedback:
 - High issues, considered as errors, they will block the commit

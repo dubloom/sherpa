@@ -2,6 +2,7 @@ import sys
 
 from typing import Optional
 
+from sherpa.config import SUPPORTED_REASONING_EFFORTS
 from sherpa.supported_models import SUPPORTED_MODEL
 
 
@@ -29,6 +30,33 @@ def extract_model_flag() -> tuple[list[str], Optional[str], Optional[str]]:
             i += 1
 
     return sherpa_args, model, None
+
+
+def extract_reasoning_flag(args: list[str]) -> tuple[list[str], Optional[str], Optional[str]]:
+    """Extract --reasoning from args and validate supported values."""
+    reasoning_effort: Optional[str] = None
+    sherpa_args: list[str] = []
+
+    nb_of_args = len(args)
+    i = 0
+    while i < nb_of_args:
+        if args[i] == "--reasoning":
+            if i + 1 >= nb_of_args:
+                return [], None, "No reasoning effort was provided after --reasoning flag"
+            reasoning_effort = str(args[i + 1]).strip().lower()
+            if reasoning_effort not in SUPPORTED_REASONING_EFFORTS:
+                supported = ", ".join(SUPPORTED_REASONING_EFFORTS)
+                return [], None, (
+                    f"Reasoning effort {reasoning_effort} is not supported. "
+                    f"Use one of: {supported}"
+                )
+            i += 2
+        else:
+            sherpa_args.append(args[i])
+            i += 1
+
+    return sherpa_args, reasoning_effort, None
+
 
 def extract_commit_message(args: list[str]) -> Optional[str]:
     for i in range(len(args)):
