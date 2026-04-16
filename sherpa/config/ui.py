@@ -127,3 +127,25 @@ def prompt_new_config(initial_config: SherpaConfig) -> SherpaConfig:
         default_model=model,
         default_reasoning_effort=reasoning_effort,
     )
+
+
+def prompt_update_config(initial_config: SherpaConfig) -> SherpaConfig:
+    print("[sherpa] Updating existing config.")
+    model = _prompt_checkbox_choice(
+        "Choose your default model:",
+        tuple(SUPPORTED_MODEL),
+        initial_config.default_model or DEFAULT_MODEL,
+    )
+    reasoning_effort = _prompt_checkbox_choice(
+        (
+            "Choose your default reasoning effort "
+            "(used for OpenAI models only):"
+        ),
+        SUPPORTED_REASONING_EFFORTS,
+        initial_config.default_reasoning_effort or DEFAULT_REASONING_EFFORT,
+    )
+    print("[sherpa] Config updated.")
+    return SherpaConfig(
+        default_model=model,
+        default_reasoning_effort=reasoning_effort,
+    )

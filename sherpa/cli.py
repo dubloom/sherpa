@@ -4,6 +4,7 @@ from dataclasses import replace
 from sherpa.commands import Commands
 from sherpa.commands.address import AddressCommand
 from sherpa.commands.commit import CommitCommand
+from sherpa.commands.config import ConfigCommand
 from sherpa.commands.fix import FixCommand
 from sherpa.commands.review import ReviewCommand
 from sherpa.config import config_path, load_or_create_config
@@ -17,6 +18,23 @@ def main():
         return 1
 
     git_repo_root = get_git_repo_root()
+    sherpa_args, model, model_error = extract_model_flag()
+    sherpa_args, reasoning_effort, reasoning_error = extract_reasoning_flag(sherpa_args)
+
+    if model_error:
+        print(f"Error extracting model flag: {model_error}", file=sys.stderr)
+        return 1
+    if reasoning_error:
+        print(f"Error: {reasoning_error}", file=sys.stderr)
+        return 1
+    if not sherpa_args:
+        print("Error extracing reasoning : no provided args", file=sys.stderr)
+        return 1
+
+    command = sherpa_args[0]
+    if command == Commands.CONFIG.value:
+        return ConfigCommand.execute(sherpa_args[1:], git_repo_root, None)
+
     config_already_exists = config_path(git_repo_root).is_file()
     try:
         config = load_or_create_config(
@@ -37,25 +55,10 @@ def main():
                 file=sys.stderr,
             )
 
-    sherpa_args, model, model_error = extract_model_flag()
-    sherpa_args, reasoning_effort, reasoning_error = extract_reasoning_flag(sherpa_args)
-
-    if model_error:
-        print(f"Error extracting model flag: {model_error}", file=sys.stderr)
-        return 1
-    if reasoning_error:
-        print(f"Error: {reasoning_error}", file=sys.stderr)
-        return 1
-    if not sherpa_args:
-        print("Error extracing reasoning : no provided args", file=sys.stderr)
-        return 1
-
     if model:
         config = replace(config, default_model=model)
     if reasoning_effort:
         config = replace(config, default_reasoning_effort=reasoning_effort)
-
-    command = sherpa_args[0]
     match command:
         case Commands.COMMIT.value:
             CommitCommand.execute(sherpa_args[1:], git_repo_root, config)

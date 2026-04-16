@@ -5,3 +5,4 @@ class Commands(str, Enum):
     FIX = "fix"
     COMMIT = "commit"
     ADDRESS = "address"
+    CONFIG = "config"

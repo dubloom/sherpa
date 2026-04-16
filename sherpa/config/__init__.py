@@ -104,3 +104,7 @@ def load_or_create_config(
         _atomic_write_json(path, _to_payload(config))
 
     return config
+
+
+def save_config(repo_root: Path, config: SherpaConfig) -> None:
+    _atomic_write_json(config_path(repo_root), _to_payload(config))

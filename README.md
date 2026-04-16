@@ -44,6 +44,14 @@ Then it creates `.sherpa/config.json`:
 `default_reasoning_effort` controls the review reasoning effort (OpenAI models only) and must be one of:
 `low`, `medium`, or `high`.
 
+To update your existing config later, run:
+
+```bash
+sherpa config
+```
+
+This opens the same interactive UI and saves your updated defaults.
+
 The review will contain four potential categories of feedback:
 - High issues, considered as errors, they will block the commit
 - Medium issues, considered as warnings, they will not block the commit
