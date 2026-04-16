@@ -6,9 +6,9 @@ from sherpa.commands.address import AddressCommand
 from sherpa.commands.commit import CommitCommand
 from sherpa.commands.fix import FixCommand
 from sherpa.commands.review import ReviewCommand
-from sherpa.config import load_or_create_config
+from sherpa.config import config_path, load_or_create_config
 from sherpa.config.ui import is_interactive_session, prompt_new_config
-from sherpa.git import get_git_repo_root, in_git_repo
+from sherpa.git import SherpaGitExcludeStatus, ensure_sherpa_git_exclude, get_git_repo_root, in_git_repo
 from sherpa.utils import extract_model_flag, extract_reasoning_flag
 
 def main():
@@ -17,6 +17,7 @@ def main():
         return 1
 
     git_repo_root = get_git_repo_root()
+    config_already_exists = config_path(git_repo_root).is_file()
     try:
         config = load_or_create_config(
             git_repo_root,
@@ -25,6 +26,16 @@ def main():
     except KeyboardInterrupt:
         print("Setup cancelled.", file=sys.stderr)
         return 1
+
+    if not config_already_exists:
+        sherpa_is_excluded_status = ensure_sherpa_git_exclude(git_repo_root)
+        if sherpa_is_excluded_status == SherpaGitExcludeStatus.ADDED:
+            print("[sherpa] Added '.sherpa' folder (including review results) to .git/info/exclude.", file=sys.stderr)
+        elif sherpa_is_excluded_status == SherpaGitExcludeStatus.ERROR:
+            print(
+                "Tip: add '.sherpa' to .git/info/exclude to avoid accidentally committing local Sherpa files.",
+                file=sys.stderr,
+            )
 
     sherpa_args, model, model_error = extract_model_flag()
     sherpa_args, reasoning_effort, reasoning_error = extract_reasoning_flag(sherpa_args)

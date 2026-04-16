@@ -2,7 +2,14 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+from enum import Enum
 from typing import Optional
+
+
+class SherpaGitExcludeStatus(Enum):
+    ADDED = "added"
+    ALREADY_PRESENT = "already_present"
+    ERROR = "error"
 
 def in_git_repo():
     result = subprocess.run(
@@ -22,6 +29,25 @@ def get_git_repo_root() -> Path:
     if result.returncode != 0:
         raise RuntimeError("The root of the git repo could not be identified")
     return Path(result.stdout.strip())
+
+
+def ensure_sherpa_git_exclude(git_repo_root: Path) -> SherpaGitExcludeStatus:
+    exclude_path = git_repo_root / ".git" / "info" / "exclude"
+    try:
+        existing_content = exclude_path.read_text(encoding="utf-8")
+        existing_entries = {
+            line.strip()
+            for line in existing_content.splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        }
+        if ".sherpa" in existing_entries or "/.sherpa" in existing_entries:
+            return SherpaGitExcludeStatus.ALREADY_PRESENT
+
+        suffix = "" if not existing_content or existing_content.endswith("\n") else "\n"
+        exclude_path.write_text(f"{existing_content}{suffix}.sherpa\n", encoding="utf-8")
+        return SherpaGitExcludeStatus.ADDED
+    except OSError:
+        return SherpaGitExcludeStatus.ERROR
 
 def execute_git_command(
     command: list[str],
