@@ -5,7 +5,7 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from sherpa.supported_models import SUPPORTED_MODEL
 
@@ -73,12 +73,17 @@ def _load_from_payload(raw: dict[str, Any]) -> SherpaConfig:
     )
 
 
-def load_or_create_config(repo_root: Path) -> SherpaConfig:
+def load_or_create_config(
+    repo_root: Path,
+    on_missing_config: Callable[[SherpaConfig], SherpaConfig] | None = None,
+) -> SherpaConfig:
     path = config_path(repo_root)
     if not path.is_file():
-        default_config = SherpaConfig()
-        _atomic_write_json(path, _to_payload(default_config))
-        return default_config
+        initial_config = SherpaConfig()
+        if on_missing_config is not None:
+            initial_config = on_missing_config(initial_config)
+        _atomic_write_json(path, _to_payload(initial_config))
+        return initial_config
 
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))

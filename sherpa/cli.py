@@ -7,6 +7,7 @@ from sherpa.commands.commit import CommitCommand
 from sherpa.commands.fix import FixCommand
 from sherpa.commands.review import ReviewCommand
 from sherpa.config import load_or_create_config
+from sherpa.config.ui import is_interactive_session, prompt_new_config
 from sherpa.git import get_git_repo_root, in_git_repo
 from sherpa.utils import extract_model_flag, extract_reasoning_flag
 
@@ -16,7 +17,14 @@ def main():
         return 1
 
     git_repo_root = get_git_repo_root()
-    config = load_or_create_config(git_repo_root)
+    try:
+        config = load_or_create_config(
+            git_repo_root,
+            on_missing_config=prompt_new_config if is_interactive_session() else None,
+        )
+    except KeyboardInterrupt:
+        print("Setup cancelled.", file=sys.stderr)
+        return 1
 
     sherpa_args, model, model_error = extract_model_flag()
     sherpa_args, reasoning_effort, reasoning_error = extract_reasoning_flag(sherpa_args)

@@ -27,7 +27,12 @@ You can specify the model you want to use for your review using the `--model` fl
 sherpa commit --model claude-opus-4-5 -m "my commit message"
 ```
 
-If `--model` is not provided, sherpa uses `.sherpa/config.json`:
+If `--model` is not provided, sherpa uses `.sherpa/config.json`.
+On first launch, if no config is found, sherpa starts an interactive setup to choose:
+- your default model (from the supported models list)
+- your default reasoning effort (`low`, `medium`, `high`)
+
+Then it creates `.sherpa/config.json`:
 
 ```json
 {
@@ -36,7 +41,7 @@ If `--model` is not provided, sherpa uses `.sherpa/config.json`:
 }
 ```
 
-`default_reasoning_effort` controls the review reasoning effort and must be one of:
+`default_reasoning_effort` controls the review reasoning effort (OpenAI models only) and must be one of:
 `low`, `medium`, or `high`.
 
 The review will contain four potential categories of feedback:
