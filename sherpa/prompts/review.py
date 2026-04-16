@@ -6,7 +6,7 @@ def get_review_prompt(
     git_diff: str
 ):
     return f"""\
-You are reviewing git changes
+Review the provided git changes.
 Return ONLY valid JSON with this exact shape:
 {{
 "decision": "APPROVE" | "BLOCKED",
@@ -32,16 +32,17 @@ Return ONLY valid JSON with this exact shape:
     }}
 ]
 }}
+Do not include markdown fences.
+Do not add any text before or after the JSON.
 
 Review criteria:
-- Focus on correctness, regressions, security, and data-loss risks.
 - Use "issues" for all issue severities.
 - Every issue must include a unique "name" using short IDs by severity:
 - high: H0, H1, ...
 - medium: M0, M1, ...
 - low: L0, L1, ...
 - High severity issues are blocking and should use decision=BLOCKED.
-High should not be taken lightly and should be mainly around code malfunction.
+- High should be reserved for clear code malfunction or equivalent serious impact.
 - Medium severity issues are warnings only and should not block.
 - Low severity issues are informational only.
 - If there are no high severity issues, use decision=APPROVE.

@@ -3,8 +3,10 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
+import time
 from typing import Literal, Optional
-from agnos import AgentOptions, AgentQueryCompleted, AgentText, query
+from agnos import AgentOptions, AgentQueryCompleted, AgentText, AgentToolCall, AgentToolResult, query
+from agnos.messages import AgentThinking
 from sherpa.commands.base import Command
 from sherpa.commands.review.report import render_review_report
 from sherpa.git import get_branch_changes, get_staged_changes
@@ -33,6 +35,9 @@ class ReviewResult:
 
 
 def extract_review_result(review: dict | str) -> Optional[ReviewResult]:
+    if not isinstance(review, dict):
+        return None
+
     decision = str(review.get("decision", "UNRECOGNIZED")).strip().upper()
     summary = str(review.get("summary", "")).strip()
     issues = review.get("issues")
@@ -75,6 +80,73 @@ def extract_review_result(review: dict | str) -> Optional[ReviewResult]:
     )
 
 
+def _extract_first_json_object(text: str) -> Optional[str]:
+    in_string = False
+    escaped = False
+    depth = 0
+    start_idx: Optional[int] = None
+
+    for idx, ch in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == "\"":
+                in_string = False
+            continue
+
+        if ch == "\"":
+            in_string = True
+            continue
+
+        if ch == "{":
+            if depth == 0:
+                start_idx = idx
+            depth += 1
+            continue
+
+        if ch == "}":
+            if depth == 0:
+                continue
+            depth -= 1
+            if depth == 0 and start_idx is not None:
+                return text[start_idx:idx + 1]
+
+    return None
+
+
+def _extract_json_review_payload(review_text: str) -> Optional[dict]:
+    candidates: list[str] = []
+    stripped = review_text.strip()
+    if stripped:
+        candidates.append(stripped)
+
+    fenced_blocks = re.findall(r"```(?:json)?\s*([\s\S]*?)```", review_text, flags=re.IGNORECASE)
+    for block in fenced_blocks:
+        block = block.strip()
+        if block:
+            candidates.append(block)
+
+    inline_obj = _extract_first_json_object(review_text)
+    if inline_obj:
+        candidates.append(inline_obj.strip())
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            continue
+
+    return None
+
+
 class ReviewCommand(Command):
     @staticmethod
     def execute(args: list[str], repo_root: Path, model: str):
@@ -115,15 +187,6 @@ class ReviewCommand(Command):
         review_result_decision = ""
         if isinstance(review_result, ReviewResult):
             review_result_decision = review_result.decision
-        else:
-            raw_review = str(review_result or "")
-            match = re.search(
-                r"^\s*decision\s*:\s*([A-Za-z_]+)",
-                raw_review,
-                re.IGNORECASE | re.MULTILINE
-            )
-            if match:
-                review_result_decision = match.group(1).strip().upper()
 
         if review_result_decision == "APPROVE":
             print("[sherpa] The review was approved !")
@@ -154,30 +217,101 @@ class ReviewCommand(Command):
             model=model,
             allowed_tools=["Read", "Glob", "Grep"],
             instructions=(
-                "Before producing the review, inspect potentially impacted files "
-                "(for example nearby callers, shared helpers, and related tests) "
-                "to validate behavioral impact and context. "
-                "Keep exploration bounded: inspect at most 5 additional files and "
-                "use at most 12 tool calls before returning the best possible JSON."
+                "You are an expert pull-request reviewer. Your job is to protect correctness and production "
+                "safety while avoiding noise. Start from the provided diff and review changed hunks first. "
+                "Only read full files when the diff context is insufficient, and inspect additional files only "
+                "when needed to verify behavior, dependencies, "
+                "or test coverage. Prioritize findings by user impact and likelihood: report only concrete "
+                "issues that can cause malfunction, regression, security exposure, data corruption/loss, or "
+                "maintainability risk with clear downstream impact. Do not speculate; if evidence is too weak, "
+                "omit the issue. For each reported issue, tie the claim to specific code behavior and provide "
+                "a practical fix. Keep the review concise, high-signal, and strictly compliant with the "
+                "requested JSON schema."
             ),
-            max_turns=25
+            reasoning_effort="medium",
+            reasoning_summary="auto",
+            max_turns=50
         )
-
         review = ""
         total_cost_usd: Optional[float] = None
+        read_count = 0
+        thinking_count = 0
+        started_at = time.monotonic()
+        status_line_len = 0
+        elapsed_line_len = 0
+        status_started = False
+        current_status: Optional[str] = None
+        current_count = 0
+
+        def update_status(status: str, count: int):
+            nonlocal status_line_len, elapsed_line_len, status_started
+            nonlocal current_status, current_count
+            current_status = status
+            current_count = count
+            elapsed = int(time.monotonic() - started_at)
+            status_line = f"{status} ({count})"
+            elapsed_line = f"Elapsed: {elapsed}s"
+
+            padded_status_line = status_line
+            if len(status_line) < status_line_len:
+                padded_status_line = status_line + (" " * (status_line_len - len(status_line)))
+
+            padded_elapsed_line = elapsed_line
+            if len(elapsed_line) < elapsed_line_len:
+                padded_elapsed_line = elapsed_line + (" " * (elapsed_line_len - len(elapsed_line)))
+
+            if not status_started:
+                print()
+                print(padded_status_line)
+                print(padded_elapsed_line)
+                status_started = True
+            else:
+                # Move back to the two status lines and rewrite them in place.
+                print("\033[2F", end="")
+                print(f"\r{padded_status_line}")
+                print(f"\r{padded_elapsed_line}")
+
+            status_line_len = len(status_line)
+            elapsed_line_len = len(elapsed_line)
+
+        async def refresh_elapsed_time():
+            while True:
+                await asyncio.sleep(1)
+                if current_status is not None:
+                    update_status(current_status, current_count)
+
+        ticker_task = asyncio.create_task(refresh_elapsed_time())
 
         # Where the review in fact happens
-        async for message in query(prompt=prompt, options=options):
-            if isinstance(message, AgentText):
-                review += message.text + "\n"
-            elif isinstance(message, AgentQueryCompleted):
-                # TODO: give a second look to that when working on agnos
-                # OpenAI may only populate final assistant text on completion.
-                if not review.strip() and isinstance(message.message, str) and message.message.strip():
-                    review = message.message.strip()
-                raw_cost = message.total_cost_usd
-                if isinstance(raw_cost, int | float):
-                    total_cost_usd = float(raw_cost)
+        try:
+            async for message in query(prompt=prompt, options=options):
+                # This is only UI stuff
+                if isinstance(message, AgentToolCall) and message.name in ["read_file", "grep_files", "Read", "Grep"]:
+                    read_count += 1
+                    update_status("⏳ Reading files", read_count)
+
+                elif isinstance(message, AgentThinking):
+                    if message.text and message.text.strip():
+                        thinking_count += 1
+                        update_status("🧠 Thinking", thinking_count)
+
+                # This is actually useful
+                if isinstance(message, AgentText):
+                    review += message.text + "\n"
+                elif isinstance(message, AgentQueryCompleted):
+                    # TODO: give a second look to that when working on agnos
+                    # OpenAI may only populate final assistant text on completion.
+                    if not review.strip() and isinstance(message.message, str) and message.message.strip():
+                        review = message.message.strip()
+                    raw_cost = message.total_cost_usd
+                    if isinstance(raw_cost, int | float):
+                        total_cost_usd = float(raw_cost)
+        finally:
+            ticker_task.cancel()
+            try:
+                await ticker_task
+            except asyncio.CancelledError:
+                pass
 
         # The agent will give an answer like:
         # ```json
@@ -185,14 +319,13 @@ class ReviewCommand(Command):
         # ```
         # The below code convert that review into a real review
 
-        review = review.strip().removeprefix("```json").removesuffix("```").strip()
-        try:
-            json_review = json.loads(review)
+        json_review = _extract_json_review_payload(review)
+        if json_review is not None:
             review_result = extract_review_result(json_review)
             if review_result is None:
                 return json.dumps(json_review), total_cost_usd
             return review_result, total_cost_usd
-        except json.JSONDecodeError:
-            print("[sherpa] Model did not respond with valid JSON. Will show raw output")
-            return review, total_cost_usd
+
+        print("[sherpa] Model did not respond with valid JSON. Will show raw output")
+        return review.strip(), total_cost_usd
 
