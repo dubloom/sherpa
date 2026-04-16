@@ -88,6 +88,78 @@ def _input_with_colored_typing(
         sys.stdout.flush()
 
 
+def _prompt_action_key(
+    prompt: str,
+    *,
+    valid_keys: set[str],
+    default_key: Optional[str] = None,
+    prompt_color: str = CYAN,
+    input_color: str = GREEN,
+) -> str:
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        try:
+            raw = input(prompt).strip().lower()
+        except EOFError:
+            if default_key is not None:
+                return default_key
+            return next(iter(valid_keys))
+        if raw:
+            first = raw[0]
+            if first in valid_keys:
+                return first
+        if default_key is not None:
+            return default_key
+        return next(iter(valid_keys))
+
+    try:
+        import termios
+        import tty
+    except ImportError:
+        try:
+            raw = input(prompt).strip().lower()
+        except EOFError:
+            if default_key is not None:
+                return default_key
+            return next(iter(valid_keys))
+        if raw:
+            first = raw[0]
+            if first in valid_keys:
+                return first
+        if default_key is not None:
+            return default_key
+        return next(iter(valid_keys))
+
+    if _supports_color():
+        sys.stdout.write(f"{_colorize_bold(prompt, prompt_color)}{input_color}")
+    else:
+        sys.stdout.write(prompt)
+    sys.stdout.flush()
+
+    fd = sys.stdin.fileno()
+    old_attrs = termios.tcgetattr(fd)
+    try:
+        while True:
+            tty.setraw(fd)
+            key = sys.stdin.read(1)
+            if key in ("\r", "\n"):
+                if default_key is None:
+                    continue
+                chosen = default_key
+            else:
+                chosen = key.lower()
+                if chosen not in valid_keys:
+                    continue
+            # Remove the action prompt line once a valid choice is made.
+            sys.stdout.write("\r\x1b[2K")
+            sys.stdout.flush()
+            return chosen
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+        if _supports_color():
+            sys.stdout.write(RESET)
+            sys.stdout.flush()
+
+
 def _list_tracked_files(repo_root: Path) -> list[str]:
     result = subprocess.run(
         ["git", "ls-files", "-z"],
@@ -235,6 +307,14 @@ def _print_single_file_diff(
     return True
 
 
+def _print_block_header(title: str, color: str = CYAN) -> None:
+    width = shutil.get_terminal_size((120, 30)).columns
+    line = "=" * max(30, min(width, 120))
+    print(_colorize_bold(line, color))
+    print(_colorize_bold(title, color))
+    print(_colorize_bold(line, color))
+
+
 def _prompt_yes_no(prompt: str, default_yes: bool = True) -> bool:
     suffix = " [Y/n]: " if default_yes else " [y/N]: "
     try:
@@ -319,7 +399,6 @@ def _prompt_issue_checkboxes(issues: list[Issue]) -> Optional[list[Issue]]:
             pointer = ">" if idx == cursor else " "
             line = f"{pointer} [{marker}] {idx + 1}. [{issue.name}] {issue.title} ({issue.file})"
             lines.append(_crop(line, width))
-        lines.append(_crop(f"[sherpa] {len(selected)} selected. {status}", width))
 
         if last_rendered_lines > 0:
             sys.stdout.write(f"\x1b[{last_rendered_lines}A")
@@ -384,7 +463,8 @@ def _prompt_issue_checkboxes(issues: list[Issue]) -> Optional[list[Issue]]:
         elif key == "enter":
             if selected:
                 break
-            status = "Select at least one issue."
+            print()
+            return None
         elif key == "quit":
             print()
             return None
@@ -610,6 +690,10 @@ def _prompt_extra_instruction(prompt_text: str = "Extra Instruction: ") -> Optio
     return raw or None
 
 
+def _prompt_refinement_instruction(issue_name: str) -> Optional[str]:
+    return _prompt_extra_instruction(f"Refine [{issue_name}] with instruction: ")
+
+
 def _collect_extra_instructions(issues: list[Issue]) -> dict[str, Optional[str]]:
     instructions: dict[str, Optional[str]] = {}
     if not issues:
@@ -626,6 +710,7 @@ class _FixDisplayCoordinator:
         self._issues = issues
         self._statuses: dict[str, str] = {issue.name: "queued" for issue in issues}
         self._started_at: dict[str, float] = {}
+        self._ended_at: dict[str, float] = {}
         self._lock = threading.RLock()
         self._tty = sys.stdout.isatty()
         self._dashboard_visible = False
@@ -642,7 +727,8 @@ class _FixDisplayCoordinator:
             label = f"{issue.name}:{_status_badge(st)}"
             t0 = self._started_at.get(issue.name)
             if t0 is not None and st in ("running", "finished", "failed"):
-                label += f"({int(now - t0)}s)"
+                t1 = self._ended_at.get(issue.name, now)
+                label += f"({int(t1 - t0)}s)"
             parts.append(label)
         return f"[sherpa] Progress: {' | '.join(parts)}"
 
@@ -666,6 +752,9 @@ class _FixDisplayCoordinator:
             self._statuses[issue_name] = new_status
             if new_status == "running":
                 self._started_at[issue_name] = time.time()
+                self._ended_at.pop(issue_name, None)
+            elif new_status in ("finished", "failed"):
+                self._ended_at.setdefault(issue_name, time.time())
         self.render_progress()
 
     def _clear_dashboard_line(self) -> None:
@@ -772,9 +861,14 @@ class FixCommand(Command):
 
         extra_instruction_by_issue = _collect_extra_instructions(issues_to_fix)
 
+        print()
         print(_colorize_bold("[sherpa] Fix Session", CYAN))
         print(f"[sherpa] Running fix agent(s) for: {', '.join(i.name for i in issues_to_fix)}")
         display = _FixDisplayCoordinator(issues_to_fix)
+        kept_issues = 0
+        discarded_issues = 0
+        applied_files_total = 0
+        conflict_files_total = 0
 
         def on_progress(issue_name: str, new_status: str) -> None:
             display.update_status(issue_name, new_status)
@@ -798,30 +892,50 @@ class FixCommand(Command):
             after_snapshot: dict[str, Optional[bytes]],
         ) -> tuple[str, Optional[str]]:
             def render_issue() -> tuple[str, Optional[str]]:
+                nonlocal kept_issues, discarded_issues, applied_files_total, conflict_files_total
                 print()
-                print(_colorize_bold(f"=== Fix: [{issue_name}] (attempt {attempt}) ===", CYAN))
+                _print_block_header(f"[sherpa] Result [{issue_name}] (attempt {attempt})")
                 if err is not None:
                     print(_colorize_bold(f"[sherpa] Error in [{issue_name}]: {err}", RED), file=sys.stderr)
+                    discarded_issues += 1
                     return ("discard", None)
 
                 if not changed_paths:
                     print(_colorize(f"[sherpa] [{issue_name}] no changes detected.", YELLOW))
                     if completion_message:
-                        print(_colorize("[sherpa] Agent completion message:", CYAN))
-                        print(completion_message)
-                    if _prompt_yes_no(
-                        _colorize_bold(
-                            f"[sherpa] Retry [{issue_name}] with a new instruction in the same agent session?",
-                            YELLOW,
-                        ),
-                        default_yes=True,
-                    ):
-                        retry_instruction = _prompt_extra_instruction("New Instruction: ")
-                        if retry_instruction:
-                            return ("retry", retry_instruction)
-                        print(_colorize("[sherpa] Empty instruction; discarding this attempt.", YELLOW))
-                    return ("discard", None)
+                        print(_colorize("[sherpa] Press 'm' to inspect agent message.", CYAN))
+                    print(_colorize("[sherpa] Press 'r' to refine with a new AI instruction.", CYAN))
 
+                    while True:
+                        action = _prompt_action_key(
+                            "[sherpa] Action: [d]iscard, [r]efine, [m]essage (default: r): ",
+                            valid_keys={"d", "r", "m"},
+                            default_key="r",
+                        )
+                        if action == "m":
+                            if completion_message:
+                                print(_colorize("[sherpa] Agent completion message:", CYAN))
+                                print(completion_message)
+                            else:
+                                print(_colorize("[sherpa] No completion message available.", YELLOW))
+                            continue
+                        if action == "r":
+                            retry_instruction = _prompt_refinement_instruction(issue_name)
+                            if retry_instruction is not None:
+                                print(_colorize("[sherpa] Re-running fix with your refinement instruction...", CYAN))
+                                return ("retry", retry_instruction)
+                            if not sys.stdin.isatty() or not sys.stdout.isatty():
+                                discarded_issues += 1
+                                return ("discard", None)
+                            print(_colorize("[sherpa] No instruction entered; keeping current result.", YELLOW))
+                            continue
+                        if action == "d":
+                            discarded_issues += 1
+                            return ("discard", None)
+
+                print(_colorize(f"[sherpa] [{issue_name}] changed {len(changed_paths)} file(s).", CYAN))
+                print()
+                print(_colorize_bold("[sherpa] Patch preview:", CYAN))
                 for rel_path in changed_paths:
                     _print_single_file_diff(
                         rel_path,
@@ -829,22 +943,34 @@ class FixCommand(Command):
                         after_snapshot.get(rel_path),
                     )
 
-                print(
-                    _colorize(
-                        f"[sherpa] [{issue_name}] changed {len(changed_paths)} file(s).",
-                        CYAN,
+                while True:
+                    action = _prompt_action_key(
+                        "[sherpa] Action: [k]eep, [d]iscard, [r]efine (default: k): ",
+                        valid_keys={"k", "d", "r"},
+                        default_key="k",
                     )
-                )
-                if _prompt_yes_no(
-                    _colorize_bold(f"[sherpa] Keep changes for [{issue_name}]?", YELLOW),
-                    default_yes=True,
-                ):
+
+                    if action == "r":
+                        retry_instruction = _prompt_refinement_instruction(issue_name)
+                        if retry_instruction is not None:
+                            print(_colorize("[sherpa] Re-running fix with your refinement instruction...", CYAN))
+                            return ("retry", retry_instruction)
+                        print(_colorize("[sherpa] No instruction entered; keeping current patch.", YELLOW))
+                        continue
+                    if action == "d":
+                        print(_colorize_bold(f"[sherpa] Discarded changes for [{issue_name}].", YELLOW))
+                        discarded_issues += 1
+                        return ("discard", None)
+
                     applied, already_present, conflicted = _apply_issue_delta_to_main(
                         root,
                         changed_paths,
                         after_snapshot,
                         main_baseline,
                     )
+                    applied_files_total += len(applied)
+                    conflict_files_total += len(conflicted)
+                    kept_issues += 1
                     if applied:
                         print(
                             _colorize_bold(
@@ -870,22 +996,6 @@ class FixCommand(Command):
                             file=sys.stderr,
                         )
                     return ("keep", None)
-
-                if _prompt_yes_no(
-                    _colorize_bold(
-                        f"[sherpa] Retry [{issue_name}] with a new instruction in the same agent session?",
-                        YELLOW,
-                    ),
-                    default_yes=True,
-                ):
-                    retry_instruction = _prompt_extra_instruction("New Instruction: ")
-                    if retry_instruction:
-                        print(_colorize("[sherpa] Retrying with your instruction...", CYAN))
-                        return ("retry", retry_instruction)
-                    print(_colorize("[sherpa] Empty instruction; discarding this attempt.", YELLOW))
-
-                print(_colorize_bold(f"[sherpa] Discarded changes for [{issue_name}].", YELLOW))
-                return ("discard", None)
 
             return render_issue()
 
@@ -931,5 +1041,12 @@ class FixCommand(Command):
 
         display.finalize()
         print()
-        print(f"[sherpa] Total cost: {_colorize_bold(f'{aggregate_cost}$', CYAN)}")
+        print(
+            _colorize(
+                f"[sherpa] Summary: kept {kept_issues} issue(s), discarded {discarded_issues} issue(s), "
+                f"applied {applied_files_total} file(s), conflicts {conflict_files_total}.",
+                CYAN,
+            )
+        )
+        print(f"[sherpa] Total cost: {_colorize_bold(f'${aggregate_cost:.4f}', CYAN)}")
         print("[sherpa] Review and stage changes before committing.")
