@@ -10,6 +10,59 @@ from sherpa.git import get_staged_changes
 from sherpa.review_store import save_review
 from sherpa.utils import extract_commit_message
 
+
+def _append_approval_line(message: str, approval_line: str) -> str:
+    normalized = message.rstrip()
+    if not normalized:
+        return approval_line
+    if approval_line in normalized.splitlines():
+        return normalized
+    return f"{normalized}\n\n{approval_line}"
+
+
+def _build_approved_commit_args(args: list[str], model_name: str) -> list[str]:
+    approval_line = f"Approved-By: {model_name}"
+    updated_args = list(args)
+    message_targets: list[tuple[str, int]] = []
+    i = 0
+    while i < len(updated_args):
+        arg = updated_args[i]
+        if arg == "--":
+            break
+        if arg == "-m":
+            if i + 1 < len(updated_args):
+                message_targets.append(("value", i + 1))
+            i += 2
+            continue
+        if arg == "--message":
+            if i + 1 < len(updated_args):
+                message_targets.append(("value", i + 1))
+            i += 2
+            continue
+        if arg.startswith("--message="):
+            message_targets.append(("inline", i))
+            i += 1
+            continue
+        i += 1
+
+    if message_targets:
+        target_type, target_index = message_targets[-1]
+        if target_type == "value":
+            updated_args[target_index] = _append_approval_line(updated_args[target_index], approval_line)
+        else:
+            prefix, value = updated_args[target_index].split("=", maxsplit=1)
+            updated_args[target_index] = f"{prefix}={_append_approval_line(value, approval_line)}"
+        return updated_args
+
+    # No explicit message argument: ask git to add a commit trailer.
+    # Insert before `--` (end of options) so trailer is not parsed as pathspec.
+    if "--" in updated_args:
+        separator_index = updated_args.index("--")
+        updated_args[separator_index:separator_index] = ["--trailer", approval_line]
+    else:
+        updated_args.extend(["--trailer", approval_line])
+    return updated_args
+
 class CommitCommand(Command):
     @staticmethod
     def execute(args: list[str], repo_root: Path, config: SherpaConfig):
@@ -48,7 +101,8 @@ class CommitCommand(Command):
 
         if review_result_decision == "APPROVE":
             print("[sherpa] The commit was approved !")
-            subprocess.run(["git", "commit", *args], cwd=repo_root)
+            approved_commit_args = _build_approved_commit_args(args, config.default_model)
+            subprocess.run(["git", "commit", *approved_commit_args], cwd=repo_root)
             print("\n[sherpa] Showing review output....")
             render_review_report(review_result)
         elif review_result_decision == "BLOCKED":
