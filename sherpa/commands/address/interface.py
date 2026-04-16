@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import sys
 import textwrap
 from pathlib import Path
@@ -80,6 +81,69 @@ def clear_screen() -> None:
 
 def wrap_lines(text: str, width: int) -> list[str]:
     return textwrap.wrap(text, width=max(10, width)) or [""]
+
+
+def _wrap_with_prefix(prefix: str, content: str, width: int) -> list[str]:
+    available = max(10, width - len(prefix))
+    wrapped = textwrap.wrap(content, width=available) or [""]
+    return [f"{prefix}{wrapped[0]}", *[f"{' ' * len(prefix)}{line}" for line in wrapped[1:]]]
+
+
+def _print_suggestion_preview(suggestion: str, *, width: int, colorful: bool) -> None:
+    in_code_block = False
+    ordered_list_match = re.compile(r"^(\d+\.\s+)(.*)$")
+
+    for line_text in suggestion.splitlines():
+        stripped = line_text.strip()
+
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            lang = stripped[3:].strip()
+            label = f"[code block: {lang}]" if lang else "[code block]"
+            print(style(label, Ansi.DIM, Ansi.FG_CYAN, enabled=colorful))
+            continue
+
+        if not stripped:
+            print()
+            continue
+
+        if in_code_block:
+            diff_color = Ansi.FG_WHITE
+            if line_text.startswith("+++ ") or line_text.startswith("--- "):
+                diff_color = Ansi.FG_YELLOW
+            elif line_text.startswith("@@"):
+                diff_color = Ansi.FG_CYAN
+            elif line_text.startswith("+"):
+                diff_color = Ansi.FG_GREEN
+            elif line_text.startswith("-"):
+                diff_color = Ansi.FG_MAGENTA
+
+            for wrapped in wrap_lines(line_text, width=width):
+                print(style(wrapped, diff_color, enabled=colorful))
+            continue
+
+        if stripped.startswith("#"):
+            heading = stripped.lstrip("#").strip()
+            if heading:
+                for wrapped in wrap_lines(heading, width=width):
+                    print(style(wrapped, Ansi.BOLD, Ansi.FG_YELLOW, enabled=colorful))
+            continue
+
+        if stripped.startswith("- ") or stripped.startswith("* "):
+            content = stripped[2:].strip()
+            for wrapped in _wrap_with_prefix("• ", content, width):
+                print(style(wrapped, Ansi.FG_WHITE, enabled=colorful))
+            continue
+
+        match = ordered_list_match.match(stripped)
+        if match:
+            prefix, content = match.groups()
+            for wrapped in _wrap_with_prefix(prefix, content, width):
+                print(style(wrapped, Ansi.FG_WHITE, enabled=colorful))
+            continue
+
+        for wrapped in wrap_lines(line_text, width=width):
+            print(style(wrapped, Ansi.FG_WHITE, enabled=colorful))
 
 
 def _code_location_dict(thread: CommentThread) -> dict[str, Any] | None:
@@ -366,7 +430,7 @@ def print_help(colorful: bool) -> None:
         "",
         "Other",
         "  r, reply              Write a reply (two blank lines to send) — posts on GitHub",
-        "  f, fix                Optional AI suggestion, then writable fix agent + keep/retry",
+        "  f, fix                Optional initial prompt + suggestion, then writable fix agent",
         "  d, done               Remove current thread from this list (UI only)",
         "  h, help               Show this screen",
         "  q, quit               Exit",
@@ -422,10 +486,7 @@ def _show_suggestion_screen(
         print(style(f"Suggestion cost: ${cost:.4f}", Ansi.DIM, enabled=colorful))
     print()
 
-    for line_text in suggestion.splitlines():
-        wrapped_lines = wrap_lines(line_text, width=width) if line_text else [""]
-        for wrapped in wrapped_lines:
-            print(style(wrapped, Ansi.FG_WHITE, enabled=colorful))
+    _print_suggestion_preview(suggestion, width=width, colorful=colorful)
 
     print()
 
@@ -524,6 +585,7 @@ def _run_fix_agent_flow(
         if attempt_cost is not None:
             print(style(f"Fix attempt cost: ${attempt_cost:.4f}", Ansi.DIM, enabled=colorful))
         if completion_message:
+            print()
             print(style("Agent completion note:", Ansi.FG_CYAN, Ansi.BOLD, enabled=colorful))
             for line in completion_message.splitlines():
                 print(style(line, Ansi.FG_WHITE, enabled=colorful))
@@ -624,6 +686,11 @@ def _run_thread_fix_workflow(
     *,
     colorful: bool,
 ) -> tuple[str, bool]:
+    initial_prompt = read_single_line(
+        "Initial prompt for the agent (Enter to skip): ",
+        colorful=colorful,
+    )
+
     ask_ai_suggestion = prompt_yes_no(
         "Do you want an AI suggestion before applying a fix?",
         colorful=colorful,
@@ -631,7 +698,7 @@ def _run_thread_fix_workflow(
     )
 
     suggested_fix: Optional[str] = None
-    initial_instruction: Optional[str] = None
+    initial_instruction: Optional[str] = initial_prompt
 
     if ask_ai_suggestion:
         print()
@@ -653,6 +720,7 @@ def _run_thread_fix_workflow(
                     pr_number,
                     thread,
                     all_threads,
+                    initial_prompt,
                     model,
                 )
             )
@@ -661,16 +729,19 @@ def _run_thread_fix_workflow(
 
         _show_suggestion_screen(thread, suggested_fix, cost, colorful=colorful)
         print()
-        initial_instruction = read_single_line(
+        extra_instruction = read_single_line(
             "Optional extra instruction for the fix agent (Enter to skip): ",
             colorful=colorful,
         )
+        if extra_instruction:
+            initial_instruction = merge_instruction(initial_instruction, extra_instruction)
     else:
-        print()
-        initial_instruction = read_single_line(
-            "Instruction for the fix agent (required): ",
-            colorful=colorful,
-        )
+        if not initial_instruction:
+            print()
+            initial_instruction = read_single_line(
+                "Instruction for the fix agent (required): ",
+                colorful=colorful,
+            )
         if not initial_instruction:
             return ("Fix flow cancelled (no instruction provided).", False)
 

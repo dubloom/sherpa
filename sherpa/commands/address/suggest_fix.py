@@ -81,10 +81,14 @@ def build_address_suggest_prompt(
     pr_number: int,
     thread: CommentThread,
     all_threads: list[CommentThread],
+    user_instruction: Optional[str],
 ) -> str:
     snippet = "\n".join(_thread_snippet_for_prompt(repo_root, thread))
     transcript = _format_thread_transcript(thread)
     others = _other_threads_summary(thread, all_threads)
+    instruction_block = (
+        user_instruction.strip() if user_instruction and user_instruction.strip() else "(none)"
+    )
 
     return f"""\
 You are helping a developer respond to a GitHub pull request review comment thread.
@@ -105,6 +109,9 @@ checkout (may differ from the PR branch); use tools to read the current files yo
 
 ## Other threads on this PR (titles only; for cross-cutting context)
 {others}
+
+## User guidance (optional)
+{instruction_block}
 
 ## What to do
 1. Use **Read**, **Glob**, and **Grep** to inspect any relevant files (definitions, callers, tests, configs).
@@ -178,10 +185,11 @@ async def suggest_fix_for_thread_async(
     pr_number: int,
     thread: CommentThread,
     all_threads: list[CommentThread],
+    user_instruction: Optional[str],
     model: str,
 ) -> tuple[str, Optional[float]]:
     prompt = build_address_suggest_prompt(
-        repo_root, owner, repo, pr_number, thread, all_threads
+        repo_root, owner, repo, pr_number, thread, all_threads, user_instruction
     )
     options = AgentOptions(
         cwd=repo_root,
@@ -274,6 +282,7 @@ def suggest_fix_for_thread(
     pr_number: int,
     thread: CommentThread,
     all_threads: list[CommentThread],
+    user_instruction: Optional[str],
     model: str,
 ) -> tuple[str, Optional[float]]:
     return asyncio.run(
@@ -284,6 +293,7 @@ def suggest_fix_for_thread(
             pr_number,
             thread,
             all_threads,
+            user_instruction,
             model,
         )
     )
