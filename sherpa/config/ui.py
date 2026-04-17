@@ -64,6 +64,8 @@ def _render_checkbox_menu(prompt: str, options: tuple[str, ...], selected_idx: i
 
 
 def _prompt_checkbox_choice_fallback(options: tuple[str, ...], default: str) -> str:
+    if default not in options:
+        default = options[0]
     default_idx = options.index(default) + 1
     while True:
         choice = input(f"Select one option [1-{len(options)}] (default: {default_idx}): ").strip()
@@ -77,6 +79,11 @@ def _prompt_checkbox_choice_fallback(options: tuple[str, ...], default: str) -> 
 
 
 def _prompt_checkbox_choice(prompt: str, options: tuple[str, ...], default: str) -> str:
+    if not options:
+        raise ValueError("Checkbox prompt requires at least one option.")
+    if default not in options:
+        default = options[0]
+
     if termios is None or tty is None:
         print(prompt)
         _print_checkbox_options(options, default)

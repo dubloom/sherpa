@@ -10,9 +10,8 @@ from agnos.messages import AgentThinking
 from sherpa.commands.base import Command
 from sherpa.commands.review.report import render_review_report
 from sherpa.config import SherpaConfig
-from sherpa.git import get_branch_changes, get_staged_changes
+from sherpa.git import get_branch_changes, get_commit_changes, get_staged_changes
 from sherpa.prompts.review import get_review_prompt
-from sherpa.utils import extract_commit_message
 
 
 @dataclass
@@ -33,6 +32,42 @@ class ReviewResult:
     medium_issues: list[Issue]
     low_issues: list[Issue]
     nits: list[Issue]
+
+
+def _print_review_usage() -> None:
+    print("[sherpa] Usage:")
+    print("[sherpa]   sherpa review")
+    print("[sherpa]   sherpa review --branch")
+    print("[sherpa]   sherpa review --last")
+    print("[sherpa]   sherpa review <commit>")
+
+
+def _parse_review_target(
+    args: list[str],
+) -> tuple[Optional[Literal["staged", "branch", "commit"]], Optional[str], Optional[str]]:
+    branch_mode = "--branch" in args
+    last_mode = "--last" in args
+    remaining_args = [arg for arg in args if arg not in {"--branch", "--last"}]
+    unknown_flags = [arg for arg in remaining_args if arg.startswith("-")]
+
+    if unknown_flags:
+        return None, None, f"Unrecognized option(s): {' '.join(unknown_flags)}"
+    if branch_mode and last_mode:
+        return None, None, "Flags --branch and --last cannot be combined."
+    if branch_mode and remaining_args:
+        return None, None, "review <commit> cannot be combined with --branch."
+    if last_mode and remaining_args:
+        return None, None, "--last cannot be combined with review <commit>."
+    if len(remaining_args) > 1:
+        return None, None, "review accepts at most one commit reference."
+
+    if branch_mode:
+        return "branch", None, None
+    if last_mode:
+        return "commit", "HEAD", None
+    if remaining_args:
+        return "commit", remaining_args[0], None
+    return "staged", None, None
 
 
 def extract_review_result(review: dict | str) -> Optional[ReviewResult]:
@@ -154,24 +189,47 @@ class ReviewCommand(Command):
         # Local import to avoid circular import at module initialization time.
         from sherpa.review_store import save_review
 
-        commit_message = extract_commit_message(args)
-        branch_mode = "--branch" in args
+        mode, commit_ref, parse_error = _parse_review_target(args)
+        if parse_error:
+            print(f"[sherpa] {parse_error}")
+            _print_review_usage()
+            return
+
+        commit_message: Optional[str] = None
         modified_files: Optional[str] = None
         git_diff: Optional[str] = None
 
-        if branch_mode:
+        if mode == "branch":
             modified_files, git_diff, base_branch = get_branch_changes(repo_root)
             if not base_branch:
                 print("[sherpa] Could not find main/master base branch, exiting...")
                 return
             print(f"[sherpa] Reviewing current branch changes against {base_branch}")
+        elif mode == "commit":
+            if not commit_ref:
+                print("[sherpa] Missing commit reference, exiting...")
+                _print_review_usage()
+                return
+
+            modified_files, git_diff, resolved_commit, commit_subject = get_commit_changes(repo_root, commit_ref)
+            if not resolved_commit:
+                print(f"[sherpa] Could not resolve commit '{commit_ref}', exiting...")
+                return
+
+            commit_message = commit_subject or resolved_commit
+            if commit_ref == "HEAD":
+                print(f"[sherpa] Reviewing latest commit ({resolved_commit})")
+            else:
+                print(f"[sherpa] Reviewing commit {resolved_commit}")
         else:
             print("[sherpa] Reviewing staged changes")
             modified_files, git_diff = get_staged_changes(repo_root)
 
         if not modified_files and not git_diff:
-            if branch_mode:
+            if mode == "branch":
                 print("[sherpa] No changes found between current branch and base branch, exiting...")
+            elif mode == "commit":
+                print("[sherpa] No changes found in selected commit, exiting...")
             else:
                 print("[sherpa] It seems you don't have any staged changes, exiting...")
             return
@@ -193,8 +251,15 @@ class ReviewCommand(Command):
             save_review(repo_root, commit_message, modified_files, git_diff, None, raw)
 
         review_result_decision = ""
+        issue_count = 0
         if isinstance(review_result, ReviewResult):
             review_result_decision = review_result.decision
+            issue_count = (
+                len(review_result.high_issues)
+                + len(review_result.medium_issues)
+                + len(review_result.low_issues)
+                + len(review_result.nits)
+            )
 
         if review_result_decision == "APPROVE":
             print("[sherpa] The review was approved !")
@@ -207,6 +272,9 @@ class ReviewCommand(Command):
             print("[sherpa] Review decision unrecognized, no decision will be taken...")
             print("[sherpa] Showing raw result:")
             print(review_result)
+
+        if issue_count > 0:
+            print("[sherpa] To address these issues, run: sherpa fix")
 
         print(f"[sherpa] Total cost of your review: {total_cost}$")
         print()
@@ -297,7 +365,7 @@ class ReviewCommand(Command):
                 # This is only UI stuff
                 if isinstance(message, AgentToolCall) and message.name in ["read_file", "grep_files", "Read", "Grep"]:
                     read_count += 1
-                    update_status("⏳ Reading files", read_count)
+                    update_status("⏳ Reading", read_count)
 
                 elif isinstance(message, AgentThinking):
                     if message.text and message.text.strip():

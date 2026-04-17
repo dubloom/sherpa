@@ -146,6 +146,45 @@ def get_branch_changes(root: Path, branch: str = "HEAD") -> tuple[Optional[str],
     return modified_files, diff, base_branch
 
 
+def get_commit_changes(
+    root: Path, commit: str
+) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    commit_ref = f"{commit}^{{commit}}"
+    if not _git_ref_exists(root, commit_ref):
+        print(f"[sherpa][warning] Could not resolve commit '{commit}'.")
+        return None, None, None, None
+
+    resolved_commit = execute_git_command(
+        ["rev-parse", "--short", commit_ref],
+        cwd=root,
+        warning_message=f"Could not resolve commit hash for {commit}",
+    )
+    commit_subject = execute_git_command(
+        ["show", "--quiet", "--format=%s", commit_ref],
+        cwd=root,
+        warning_message=f"Could not retrieve commit subject for {commit}",
+    )
+    modified_files = execute_git_command(
+        ["show", "--pretty=format:", "--name-only", commit_ref],
+        cwd=root,
+        warning_message=f"Could not retrieve the list of modified files for {commit}",
+    )
+    diff = execute_git_command(
+        [
+            "show",
+            "--patch",
+            "--no-color",
+            "--no-ext-diff",
+            "--minimal",
+            "--pretty=format:",
+            commit_ref,
+        ],
+        cwd=root,
+        warning_message=f"Could not retrieve git diff for {commit}",
+    )
+    return modified_files, diff, (resolved_commit or commit), (commit_subject or None)
+
+
 #TODO: Review what is below
 def _sanitize_worktree_label(label: str) -> str:
     sanitized = "".join(ch if (ch.isalnum() or ch in ("-", "_")) else "-" for ch in label)

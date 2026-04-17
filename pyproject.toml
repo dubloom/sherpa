@@ -1,16 +1,36 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "sherpa"
 version = "1.0.0"
-description = "Boost your git commands with AI"
+description = "CLI tool to incorporate AI to your git workflows"
 readme = "README.md"
 requires-python = ">=3.9"
-dependencies = [
-    "agnos @ file:///Users/louis.tricot/side-projects/agnos",
+authors = [
+    { name = "Louis Tricot", email = "louistricotkarl@gmail.com" },
 ]
+classifiers = [
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: OS Independent",
+]
+license = "Apache-2.0"
+license-files = ["LICEN[CS]E*"]
+dependencies = [
+    "agnos-agents"
+]
+
 
 [project.scripts]
 sherpa = "sherpa.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["sherpa*"]

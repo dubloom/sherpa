@@ -1,38 +1,22 @@
 # sherpa
 
-`sherpa` is a CLI tool allowing you to make an AI review locally your changes before comitting.
+`sherpa` is a CLI tool that runs an AI code review locally on your changes before you commit.
 
-## Install on your machine
-
-```bash
-pipx install .
-```
-
-## Usage
-
-### Review before committing
-
-In order to have an AI review your **staged** changes before comitting you can use:
+## Install
 
 ```bash
-sherpa commit -m "my commit message"
+pipx install "git+https://github.com/dubloom/sherpa.git"
 ```
 
-`sherpa commit` is intended to be use exactly like `git commit`. Specifically, all arguments
-passed after `sherpa commit` are forwared to `git commit`.
+## Configuration
 
-You can specify the model you want to use for your review using the `--model` flag:
+If `--model` is not provided, Sherpa uses `.sherpa/config.json`.
 
-```bash
-sherpa commit --model claude-opus-4-5 -m "my commit message"
-```
+On first launch, if no config is found, Sherpa starts an interactive setup to choose:
+- default model (from the supported models list)
+- default reasoning effort (`low`, `medium`, `high`)
 
-If `--model` is not provided, sherpa uses `.sherpa/config.json`.
-On first launch, if no config is found, sherpa starts an interactive setup to choose:
-- your default model (from the supported models list)
-- your default reasoning effort (`low`, `medium`, `high`)
-
-Then it creates `.sherpa/config.json`:
+It then creates:
 
 ```json
 {
@@ -41,34 +25,74 @@ Then it creates `.sherpa/config.json`:
 }
 ```
 
-`default_reasoning_effort` controls the review reasoning effort (OpenAI models only) and must be one of:
-`low`, `medium`, or `high`.
+`default_reasoning_effort` only applies to OpenAI models and must be one of:
+- `low`
+- `medium`
+- `high`
 
-To update your existing config later, run:
+To update config later:
 
 ```bash
 sherpa config
 ```
 
-This opens the same interactive UI and saves your updated defaults.
+## Usage
 
-The review will contain four potential categories of feedback:
-- High issues, considered as errors, they will block the commit
-- Medium issues, considered as warnings, they will not block the commit
-- Low issues, considered as debug, they will not block the commit
-- Nice to have.
+### `sherpa commit`: review before committing
 
-Each issue/nit will be marked with an identifier than can be used later for the fixing stage.
+Run an AI review on your **staged** changes, then commit if approved:
 
-### Fix selected issues
+```bash
+sherpa commit -m "my commit message"
+```
+
+<p align="center">
+  <img src="images/commit_example.png" alt="Example of sherpa commit" width="720" />
+</p>
+
+`sherpa commit` is intended to work like `git commit`:
+- all arguments passed after `sherpa commit` are forwarded to `git commit`
+- you can still pass your regular commit flags/message
+
+Choose a model for that run:
+
+```bash
+sherpa commit --model claude-opus-4-5 -m "my commit message"
+```
+
+For OpenAI models, you can also set reasoning effort explicitly:
+
+```bash
+sherpa commit --model gpt-5.3-codex --reasoning high -m "my commit message"
+```
+
+For default model and reasoning-effort behavior, see the [Configuration](#configuration) section.
+
+Review feedback can include four categories:
+- High (errors, blocks commit)
+- Medium (warnings, does not block commit)
+- Low (debug-level feedback, does not block commit)
+- Nice to have
+
+Each issue/nit gets an identifier you can use in the fix stage.
+
+When a commit is approved via `sherpa commit`, Sherpa appends a `Reviewed-By: <model_name>` trailer to the commit message.
+
+### `sherpa fix`: fix selected issues
 
 Use `sherpa fix` to select one or more issues from the latest stored review and apply fixes.
+
+When multiple issues are selected, Sherpa can run fixes in parallel using separate git worktrees.
 
 ```bash
 sherpa fix
 ```
 
-You can target specific issue IDs:
+<p align="center">
+  <img src="images/fix_example.png" alt="Example of sherpa fix" width="720" />
+</p>
+
+Target specific issue IDs:
 
 ```bash
 sherpa fix H0 M1
@@ -82,18 +106,59 @@ Extra Instruction:
 
 Leave it blank to run without extra instructions.
 
-### Review
+### `sherpa review`: run standalone reviews
 
-If you want to review an existing commit, you can use
+Review staged changes (default):
+
+```bash
+sherpa review
+```
+
+Review a specific commit:
 
 ```bash
 sherpa review <commit>
 ```
 
-sherpa has two flags to allow you to quickly review the latest commit or the branch against main or master:
+Quick review workflows:
 
 ```bash
 sherpa review --last
 sherpa review --branch
+```
+
+Combine with global options like `--model`:
+
+```bash
 sherpa --model claude-haiku-4-5 review --branch
 ```
+
+### `sherpa address`: address pull request feedback
+
+Use `sherpa address` to browse GitHub PR comment threads in your terminal, reply, and run a fix flow for a selected thread.
+
+```bash
+sherpa address
+```
+
+<p align="center">
+  <img src="images/address_example.png" alt="Example of sherpa address" width="720" />
+</p>
+
+`sherpa address` must be run in the right repo and on the right branch to benefit from the right code location.
+
+By default, Sherpa infers the current PR from your branch and `origin` remote but you can also target a PR explicitly:
+
+```bash
+sherpa address https://github.com/<owner>/<repo>/pull/<number>
+```
+
+Prerequisites:
+- `GITHUB_TOKEN` must be set (for GitHub API calls)
+- `origin` must point to GitHub (for PR inference)
+
+Inside the address UI you can:
+- navigate threads (`Enter`/`next`, `back`/`prev`, and `↑`/`↓` in interactive terminals)
+- reply to a thread (`r` or `reply`)
+- run an AI-assisted fix flow for the current thread (`f` or `fix`)
+- mark a thread as done in the local session (`d` or `done`)

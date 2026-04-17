@@ -74,6 +74,12 @@ AUTO_RETRY_NO_CHANGE_INSTRUCTION = (
     "is needed, explicitly say that and do not claim completion."
 )
 
+RETRY_AFTER_RESET_INSTRUCTION = (
+    "Your previous attempt has been discarded and all file changes were reverted to baseline. "
+    "Do not assume prior edits still exist. First re-read relevant files from disk with Read/Glob/Grep, "
+    "then re-apply the fix from scratch in this workspace. Prioritize the latest user refinement instruction."
+)
+
 
 def merge_instruction(current: Optional[str], new_instruction: Optional[str]) -> Optional[str]:
     """Merge a new instruction into an existing instruction for fix retry flows."""

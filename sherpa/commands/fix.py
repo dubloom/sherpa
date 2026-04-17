@@ -26,7 +26,11 @@ from sherpa.review_store import (
     parse_interactive_selection,
     parse_issue_id_args,
 )
-from sherpa.utils import AUTO_RETRY_NO_CHANGE_INSTRUCTION, merge_instruction
+from sherpa.utils import (
+    AUTO_RETRY_NO_CHANGE_INSTRUCTION,
+    RETRY_AFTER_RESET_INSTRUCTION,
+    merge_instruction,
+)
 
 MAX_CONCURRENT_FIXES = 4
 
@@ -648,7 +652,10 @@ async def _run_fixes_parallel(
 
                         if action == "retry":
                             _materialize_snapshot(workspace_root, baseline_snapshot)
-                            issue_instruction = next_instruction
+                            issue_instruction = merge_instruction(
+                                next_instruction,
+                                RETRY_AFTER_RESET_INSTRUCTION,
+                            )
                             attempt += 1
                             continue
 
