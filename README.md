@@ -76,7 +76,7 @@ Review feedback can include four categories:
 
 Each issue/nit gets an identifier you can use in the fix stage.
 
-When a commit is approved via `sherpa commit`, Sherpa appends a `Reviewed-By: <model_name>` trailer to the commit message.
+When a commit is approved via `sherpa commit`, Sherpa appends an `Approved-By: <model_name>` trailer to the commit message.
 
 ### `sherpa fix`: fix selected issues
 
