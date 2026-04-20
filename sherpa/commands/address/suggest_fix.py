@@ -1,5 +1,5 @@
 """
-Use agnos to explore the repo (Read / Glob / Grep) and propose a fix for a PR review thread.
+Use glyph to explore the repo (Read / Glob / Grep) and propose a fix for a PR review thread.
 
 Does not modify files; output is advisory text for the developer.
 """
@@ -10,7 +10,7 @@ import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
-from agnos import AgentOptions, AgentQueryCompleted, AgentText, query
+from glyph import AgentOptions, AgentQueryCompleted, AgentText, query
 
 if TYPE_CHECKING:
     from sherpa.commands.address import CommentThread

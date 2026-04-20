@@ -25,7 +25,7 @@ classifiers = [
 license = "Apache-2.0"
 license-files = ["LICEN[CS]E*"]
 dependencies = [
-    "agnos-agents"
+    "glyph-agents"
 ]
 
 

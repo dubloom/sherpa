@@ -10,8 +10,8 @@ import uuid
 from pathlib import Path
 from typing import Callable, Optional
 
-from agnos import AgentOptions, AgentQueryCompleted
-from agnos.client import AgnosClient
+from glyph import AgentOptions, AgentQueryCompleted
+from glyph.client import GlyphClient
 
 from sherpa.commands.base import Command
 from sherpa.commands.review import Issue, ReviewResult
@@ -528,7 +528,7 @@ def _apply_issue_delta_to_main(
 
 
 async def _run_fix_agent_turn(
-    client: AgnosClient,
+    client: GlyphClient,
     session_id: str,
     workspace_root: Path,
     issue: Issue,
@@ -610,7 +610,7 @@ async def _run_fixes_parallel(
                 final_changed_paths: list[str] = []
                 final_after_snapshot: dict[str, Optional[bytes]] = {}
 
-                async with AgnosClient(options) as client:
+                async with GlyphClient(options) as client:
                     while True:
                         attempt_cost, completion_message = await _run_fix_agent_turn(
                             client,

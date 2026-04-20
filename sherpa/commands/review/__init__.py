@@ -5,8 +5,8 @@ from pathlib import Path
 import re
 import time
 from typing import Literal, Optional
-from agnos import AgentOptions, AgentQueryCompleted, AgentText, AgentToolCall, query
-from agnos.messages import AgentThinking
+from glyph import AgentOptions, AgentQueryCompleted, AgentText, AgentToolCall, query
+from glyph.messages import AgentThinking
 from sherpa.commands.base import Command
 from sherpa.commands.review.report import render_review_report
 from sherpa.config import SherpaConfig
@@ -376,7 +376,7 @@ class ReviewCommand(Command):
                 if isinstance(message, AgentText):
                     review += message.text + "\n"
                 elif isinstance(message, AgentQueryCompleted):
-                    # TODO: give a second look to that when working on agnos
+                    # TODO: give a second look to that when working on glyph
                     # OpenAI may only populate final assistant text on completion.
                     if not review.strip() and isinstance(message.message, str) and message.message.strip():
                         review = message.message.strip()
