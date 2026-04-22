@@ -7,17 +7,14 @@ from sherpa.commands.commit import CommitCommand
 from sherpa.commands.config import ConfigCommand
 from sherpa.commands.fix import FixCommand
 from sherpa.commands.review import ReviewCommand
+from sherpa.commands.token import TokenCommand
 from sherpa.config import config_path, load_or_create_config
+from sherpa.config.tokens import apply_stored_token_env_defaults
 from sherpa.config.ui import is_interactive_session, prompt_new_config
 from sherpa.git import SherpaGitExcludeStatus, ensure_sherpa_git_exclude, get_git_repo_root, in_git_repo
 from sherpa.utils import extract_model_flag, extract_reasoning_flag
 
 def main():
-    if not in_git_repo():
-        print("Error: sherpa must be run inside a git repo", file=sys.stderr)
-        return 1
-
-    git_repo_root = get_git_repo_root()
     sherpa_args, model, model_error = extract_model_flag()
     sherpa_args, reasoning_effort, reasoning_error = extract_reasoning_flag(sherpa_args)
 
@@ -31,9 +28,20 @@ def main():
         print("Error extracing reasoning : no provided args", file=sys.stderr)
         return 1
 
+    # This is the only command that can be run anywhere as it is just used to set tokens
     command = sherpa_args[0]
+    if command == Commands.TOKEN.value:
+        return TokenCommand.execute(sherpa_args[1:], None, None)
+
+    if not in_git_repo():
+        print("Error: sherpa must be run inside a git repo", file=sys.stderr)
+        return 1
+
+    git_repo_root = get_git_repo_root()
     if command == Commands.CONFIG.value:
         return ConfigCommand.execute(sherpa_args[1:], git_repo_root, None)
+
+    apply_stored_token_env_defaults()
 
     config_already_exists = config_path(git_repo_root).is_file()
     try:

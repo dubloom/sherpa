@@ -36,6 +36,38 @@ To update config later:
 sherpa config
 ```
 
+## Tokens
+
+Sherpa can store provider tokens globally so they keep working across new terminals.
+
+Use:
+
+```bash
+sherpa token
+```
+
+To update only one provider without touching the others:
+
+```bash
+sherpa token openai
+sherpa token anthropic
+sherpa token github
+```
+
+This updates tokens stored in `~/.sherpa/tokens.json` for:
+- OpenAI
+- Anthropic
+- GitHub
+
+Each prompt is hidden. Leaving a prompt blank clears the stored token for that provider.
+
+For each provider, the matching environment variable overrides the stored value:
+- `OPENAI_API_KEY`
+- `ANTHROPIC_API_KEY`
+- `GITHUB_TOKEN`
+
+Stored OpenAI and Anthropic tokens are loaded into the Sherpa process automatically when the corresponding environment variables are not already set.
+
 ## Usage
 
 ### `sherpa commit`: review before committing
@@ -154,7 +186,7 @@ sherpa address https://github.com/<owner>/<repo>/pull/<number>
 ```
 
 Prerequisites:
-- `GITHUB_TOKEN` must be set (for GitHub API calls)
+- `GITHUB_TOKEN` must be set, or a GitHub token must be stored via `sherpa token`
 - `origin` must point to GitHub (for PR inference)
 
 Inside the address UI you can:

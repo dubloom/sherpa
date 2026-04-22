@@ -1,10 +1,10 @@
-import os
 from pathlib import Path
 import re
 from typing import Any, Union
 
 import requests
 
+from sherpa.config.tokens import resolve_github_token
 from sherpa.git import execute_git_command
 
 
@@ -13,10 +13,12 @@ github_headers = {}
 def build_github_headers() -> None:
     global github_headers
 
-    git_token = os.getenv("GITHUB_TOKEN")
+    git_token = resolve_github_token()
 
     if not git_token:
-        raise RuntimeError(f"[sherpa] Missing GITHUB_TOKEN, address command cannot run")
+        raise RuntimeError(
+            "[sherpa] Missing GitHub token. Set GITHUB_TOKEN or run `sherpa token`."
+        )
 
     github_headers = {
         "Accept": "application/vnd.github+json",

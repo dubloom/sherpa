@@ -30,8 +30,20 @@ def config_path(repo_root: Path) -> Path:
     return _sherpa_dir(repo_root) / CONFIG_FILENAME
 
 
-def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+def _atomic_write_json(
+    path: Path,
+    payload: dict[str, Any],
+    *,
+    parent_mode: int | None = None,
+    file_mode: int | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if parent_mode is not None:
+        try:
+            os.chmod(path.parent, parent_mode)
+        except OSError:
+            pass
+
     fd, tmp_path = tempfile.mkstemp(
         dir=path.parent,
         prefix=f".{path.name}.",
@@ -43,6 +55,11 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, path)
+        if file_mode is not None:
+            try:
+                os.chmod(path, file_mode)
+            except OSError:
+                pass
     except Exception:
         try:
             os.unlink(tmp_path)

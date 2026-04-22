@@ -6,3 +6,4 @@ class Commands(str, Enum):
     COMMIT = "commit"
     ADDRESS = "address"
     CONFIG = "config"
+    TOKEN = "token"
