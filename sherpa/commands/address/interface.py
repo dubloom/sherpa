@@ -209,7 +209,7 @@ def print_command_footer(colorful: bool, width: int, *, tty_keys: bool = False) 
     nav = "↑↓ = prev/next thread  ·  Enter = next  ·  " if tty_keys else "Enter / next = next thread  ·  back / prev = previous  ·  "
     print(
         style(
-            f"Commands:  {nav}r/reply  ·  f/fix  ·  d/done  ·  h/help  ·  q/quit",
+            f"Commands:  {nav}r/reply  ·  f/fix  ·  s/suggest  ·  d/done  ·  h/help  ·  q/quit",
             Ansi.DIM,
             Ansi.FG_WHITE,
             enabled=colorful,
@@ -350,9 +350,9 @@ def render_plain(
     current_index = max(0, min(index, len(threads) - 1)) if threads else 0
 
     header = (
-        " Sherpa address  |  ↑↓ threads  ·  [f]ix  [h]elp  [q]uit "
+        " Sherpa address  |  ↑↓ threads  ·  [f]ix  [s]uggest  ·  [h]elp  [q]uit "
         if tty_keys
-        else " Sherpa address  |  Enter/next thread  ·  [f]ix  [h]elp  [q]uit "
+        else " Sherpa address  |  Enter/next thread  ·  [f]ix  [s]uggest  ·  [h]elp  [q]uit "
     )
     print(style(header.ljust(width), Ansi.BG_NAVY, Ansi.FG_YELLOW, Ansi.BOLD, enabled=colorful))
     sub = f" {owner}/{repo}#{pr_number}  ·  {len(threads)} thread(s) "
@@ -430,7 +430,8 @@ def print_help(colorful: bool) -> None:
         "",
         "Other",
         "  r, reply              Write a reply (two blank lines to send) — posts on GitHub",
-        "  f, fix                Optional initial prompt + suggestion, then writable fix agent",
+        "  f, fix                Run the writable fix agent for this thread",
+        "  s, suggest            Preview an AI fix suggestion without editing files",
         "  d, done               Remove current thread from this list (UI only)",
         "  h, help               Show this screen",
         "  q, quit               Exit",
@@ -476,7 +477,7 @@ def _show_suggestion_screen(
     print(style(f"Thread location: {location}", Ansi.FG_CYAN, enabled=colorful))
     print(
         style(
-            "Preview only. Next step launches a writable fix agent.",
+            "Preview only. No files will be changed from this screen.",
             Ansi.FG_GREEN,
             Ansi.BOLD,
             enabled=colorful,
@@ -686,64 +687,84 @@ def _run_thread_fix_workflow(
     *,
     colorful: bool,
 ) -> tuple[str, bool]:
-    initial_prompt = read_single_line(
-        "Initial prompt for the agent (Enter to skip): ",
+    initial_instruction = read_single_line(
+        "Fix guidance (optional, Enter to skip): ",
         colorful=colorful,
     )
-
-    ask_ai_suggestion = prompt_yes_no(
-        "Do you want an AI suggestion before applying a fix?",
-        colorful=colorful,
-        default_yes=False,
-    )
-
     suggested_fix: Optional[str] = None
-    initial_instruction: Optional[str] = initial_prompt
 
-    if ask_ai_suggestion:
-        print()
-        print(
-            style(
-                "Running AI suggestion (Read/Glob/Grep in repo; no writes)…",
-                Ansi.DIM,
-                Ansi.FG_WHITE,
-                enabled=colorful,
+    return _run_fix_agent_flow(
+        repo_root,
+        owner,
+        repo,
+        pr_number,
+        thread,
+        all_threads,
+        model,
+        suggested_fix,
+        initial_instruction,
+        colorful=colorful,
+    )
+
+
+def _run_thread_suggestion_workflow(
+    repo_root: Path,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    thread: CommentThread,
+    all_threads: list[CommentThread],
+    model: str,
+    *,
+    colorful: bool,
+) -> tuple[str, bool]:
+    print()
+    print(
+        style(
+            "Running AI suggestion (Read/Glob/Grep in repo; no writes)…",
+            Ansi.DIM,
+            Ansi.FG_WHITE,
+            enabled=colorful,
+        )
+    )
+    sys.stdout.flush()
+    try:
+        suggested_fix, cost = asyncio.run(
+            suggest_fix_for_thread_async(
+                repo_root,
+                owner,
+                repo,
+                pr_number,
+                thread,
+                all_threads,
+                None,
+                model,
             )
         )
-        sys.stdout.flush()
-        try:
-            suggested_fix, cost = asyncio.run(
-                suggest_fix_for_thread_async(
-                    repo_root,
-                    owner,
-                    repo,
-                    pr_number,
-                    thread,
-                    all_threads,
-                    initial_prompt,
-                    model,
-                )
-            )
-        except Exception as exc:
-            return (str(exc), True)
+    except Exception as exc:
+        return (str(exc), True)
 
-        _show_suggestion_screen(thread, suggested_fix, cost, colorful=colorful)
+    _show_suggestion_screen(thread, suggested_fix, cost, colorful=colorful)
+    print(
+        style(
+            "Initial prompt for the fix agent (Enter to run, r to return): ",
+            Ansi.DIM,
+            Ansi.FG_WHITE,
+            enabled=colorful,
+        ),
+        end="",
+        flush=True,
+    )
+    try:
+        raw_instruction = input().strip()
+    except (EOFError, KeyboardInterrupt):
         print()
-        extra_instruction = read_single_line(
-            "Optional extra instruction for the fix agent (Enter to skip): ",
-            colorful=colorful,
-        )
-        if extra_instruction:
-            initial_instruction = merge_instruction(initial_instruction, extra_instruction)
-    else:
-        if not initial_instruction:
-            print()
-            initial_instruction = read_single_line(
-                "Instruction for the fix agent (required): ",
-                colorful=colorful,
-            )
-        if not initial_instruction:
-            return ("Fix flow cancelled (no instruction provided).", False)
+        return ("Suggestion preview complete.", False)
+
+    if raw_instruction.lower() == "r":
+        return ("Suggestion preview complete.", False)
+
+    initial_instruction = raw_instruction or None
 
     return _run_fix_agent_flow(
         repo_root,
@@ -888,6 +909,22 @@ def run_viewer(
                 print()
             thread = threads[index]
             status_message, status_is_error = _run_thread_fix_workflow(
+                repo_root,
+                owner,
+                repo,
+                pr_number,
+                thread,
+                threads,
+                model,
+                colorful=colorful,
+            )
+            continue
+
+        if key in ("s", "suggest"):
+            if use_tty_keys:
+                print()
+            thread = threads[index]
+            status_message, status_is_error = _run_thread_suggestion_workflow(
                 repo_root,
                 owner,
                 repo,

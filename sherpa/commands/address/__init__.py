@@ -128,6 +128,10 @@ class AddressCommand(Command):
         threads = build_threads(comments)
         threads.sort(key=lambda t: (t.comments[0].created_at or "") if t.comments else "")
 
+        if not threads:
+            print("[sherpa] No review comment threads on this PR (or all filtered).")
+            return
+
         from .interface import run_viewer
 
         run_viewer(threads, repo_root, owner, repo, pr_number, model=config.default_model)
