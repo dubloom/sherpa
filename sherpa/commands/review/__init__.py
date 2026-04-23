@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
+import sys
 import time
 from typing import Literal, Optional
 from glyph import AgentOptions, AgentQueryCompleted, AgentText, AgentToolCall, query
@@ -311,51 +312,137 @@ class ReviewCommand(Command):
         )
         review = ""
         total_cost_usd: Optional[float] = None
-        read_count = 0
-        thinking_count = 0
         started_at = time.monotonic()
-        status_line_len = 0
-        elapsed_line_len = 0
-        status_started = False
-        current_status: Optional[str] = None
-        current_count = 0
+        last_elapsed_logged = -1
+        elapsed_visible = False
+        interactive_output = sys.stdout.isatty()
 
-        def update_status(status: str, count: int):
-            nonlocal status_line_len, elapsed_line_len, status_started
-            nonlocal current_status, current_count
-            current_status = status
-            current_count = count
-            elapsed = int(time.monotonic() - started_at)
-            status_line = f"{status} ({count})"
-            elapsed_line = f"Elapsed: {elapsed}s"
+        def normalize_status_detail(value: object) -> Optional[str]:
+            if value is None:
+                return None
 
-            padded_status_line = status_line
-            if len(status_line) < status_line_len:
-                padded_status_line = status_line + (" " * (status_line_len - len(status_line)))
-
-            padded_elapsed_line = elapsed_line
-            if len(elapsed_line) < elapsed_line_len:
-                padded_elapsed_line = elapsed_line + (" " * (elapsed_line_len - len(elapsed_line)))
-
-            if not status_started:
-                print()
-                print(padded_status_line)
-                print(padded_elapsed_line)
-                status_started = True
+            if isinstance(value, Path):
+                detail = str(value)
+            elif isinstance(value, str):
+                detail = value.strip()
+                if not detail:
+                    return None
+                if detail.startswith("{") or detail.startswith("["):
+                    parsed: Optional[object] = None
+                    try:
+                        parsed = json.loads(detail)
+                    except json.JSONDecodeError:
+                        parsed = None
+                    if parsed is not None:
+                        return normalize_status_detail(parsed)
+            elif isinstance(value, dict):
+                for key in ["path", "file_path", "pattern", "query", "glob", "paths"]:
+                    if key in value:
+                        return normalize_status_detail(value[key])
+                detail = json.dumps(value, ensure_ascii=True, sort_keys=True)
+            elif isinstance(value, (list, tuple)):
+                parts = [normalize_status_detail(item) for item in value]
+                detail = ", ".join(part for part in parts if part)
             else:
-                # Move back to the two status lines and rewrite them in place.
-                print("\033[2F", end="")
-                print(f"\r{padded_status_line}")
-                print(f"\r{padded_elapsed_line}")
+                detail = str(value).strip()
 
-            status_line_len = len(status_line)
-            elapsed_line_len = len(elapsed_line)
+            detail = " ".join(detail.split())
+            if not detail:
+                return None
+            if len(detail) > 80:
+                return detail[:77] + "..."
+            return detail
+
+        def get_tool_call_detail(message: AgentToolCall, *keys: str) -> Optional[str]:
+            for attr in ["arguments", "args", "input", "tool_input", "payload"]:
+                raw_value = getattr(message, attr, None)
+                if raw_value is None:
+                    continue
+
+                if keys and isinstance(raw_value, dict):
+                    for key in keys:
+                        if key in raw_value:
+                            detail = normalize_status_detail(raw_value[key])
+                            if detail:
+                                return detail
+
+                detail = normalize_status_detail(raw_value)
+                if detail:
+                    return detail
+
+            for key in keys:
+                detail = normalize_status_detail(getattr(message, key, None))
+                if detail:
+                    return detail
+
+            return None
+
+        def get_tool_call_status(message: AgentToolCall) -> str:
+            tool_name = str(message.name).strip() or "Tool"
+            normalized_tool_name = tool_name.lower()
+
+            if normalized_tool_name in ["read", "read_file"]:
+                detail = get_tool_call_detail(message, "path", "file_path")
+                return f"Reading {detail}" if detail else "Reading"
+
+            if normalized_tool_name in ["grep", "grep_files"]:
+                detail = get_tool_call_detail(message, "pattern", "query")
+                return f"Grep {detail}" if detail else "Grep"
+
+            if normalized_tool_name == "glob":
+                detail = get_tool_call_detail(message, "pattern", "glob")
+                return f"Glob {detail}" if detail else "Glob"
+
+            detail = get_tool_call_detail(message, "path", "file_path", "pattern", "query", "glob")
+            return f"{tool_name} {detail}" if detail else tool_name
+
+        def log_status(status: str):
+            nonlocal elapsed_visible
+            if not interactive_output:
+                print(f"[sherpa-agent] {status}", flush=True)
+                return
+            if elapsed_visible:
+                sys.stdout.write("\r\033[2K")
+                sys.stdout.flush()
+            print(f"\033[2m[sherpa-agent] {status}\033[0m", flush=True)
+            if elapsed_visible:
+                log_elapsed(force=True)
+
+        def write_elapsed(elapsed: int):
+            nonlocal elapsed_visible
+            if not interactive_output:
+                print(f"[sherpa-agent] Elapsed: {elapsed}s", flush=True)
+                elapsed_visible = True
+                return
+            sys.stdout.write(f"\r\033[2K\033[2m[sherpa-agent] Elapsed: {elapsed}s\033[0m")
+            sys.stdout.flush()
+            elapsed_visible = True
+
+        def log_elapsed(force: bool = False):
+            nonlocal last_elapsed_logged
+            elapsed = int(time.monotonic() - started_at)
+            if not force and elapsed == last_elapsed_logged:
+                return
+            last_elapsed_logged = elapsed
+            write_elapsed(elapsed)
+
+        def finalize_elapsed():
+            if not interactive_output:
+                if not elapsed_visible:
+                    log_elapsed(force=True)
+                return
+            if not elapsed_visible:
+                log_elapsed(force=True)
+            sys.stdout.write("\n")
+            sys.stdout.flush()
 
         async def refresh_elapsed_time():
-            while True:
-                await asyncio.sleep(1)
-                if current_status is not None:
-                    update_status(current_status, current_count)
+            try:
+                while True:
+                    await asyncio.sleep(1)
+                    log_elapsed()
+            except asyncio.CancelledError:
+                return
 
         ticker_task = asyncio.create_task(refresh_elapsed_time())
 
@@ -363,14 +450,12 @@ class ReviewCommand(Command):
         try:
             async for message in query(prompt=prompt, options=options):
                 # This is only UI stuff
-                if isinstance(message, AgentToolCall) and message.name in ["read_file", "grep_files", "Read", "Grep"]:
-                    read_count += 1
-                    update_status("⏳ Reading", read_count)
+                if isinstance(message, AgentToolCall):
+                    log_status(get_tool_call_status(message))
 
                 elif isinstance(message, AgentThinking):
                     if message.text and message.text.strip():
-                        thinking_count += 1
-                        update_status("🧠 Thinking", thinking_count)
+                        log_status("Thinking")
 
                 # This is actually useful
                 if isinstance(message, AgentText):
@@ -385,10 +470,9 @@ class ReviewCommand(Command):
                         total_cost_usd = float(raw_cost)
         finally:
             ticker_task.cancel()
-            try:
-                await ticker_task
-            except asyncio.CancelledError:
-                pass
+            await ticker_task
+            log_elapsed(force=True)
+            finalize_elapsed()
 
         # The agent will give an answer like:
         # ```json
