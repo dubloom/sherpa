@@ -23,6 +23,7 @@ class Issue:
     file: str
     details: str
     suggested_fix: str
+    line_range: Optional[str] = None
 
 
 @dataclass
@@ -88,9 +89,26 @@ def extract_review_result(review: dict | str) -> Optional[ReviewResult]:
         invalid_review_output()
         return
 
+    def optional_string(value: object) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    def issue_from_payload(payload: dict) -> Issue:
+        return Issue(
+            name=str(payload.get("name", "")).strip(),
+            title=str(payload.get("title", "")).strip(),
+            severity=optional_string(payload.get("severity")),
+            file=str(payload.get("file", "")).strip(),
+            details=str(payload.get("details", "")).strip(),
+            suggested_fix=str(payload.get("suggested_fix", "")).strip(),
+            line_range=optional_string(payload.get("line_range")),
+        )
+
     def by_severity(level):
         return [
-            Issue(**i) for i in issues
+            issue_from_payload(i) for i in issues
             if str(i.get("severity", "")).strip().lower() == level
         ]
 
@@ -105,7 +123,7 @@ def extract_review_result(review: dict | str) -> Optional[ReviewResult]:
 
     nits = []
     for nit in raw_nits:
-        nits.append(Issue(**nit))
+        nits.append(issue_from_payload(nit))
 
     return ReviewResult(
         decision,
@@ -283,7 +301,7 @@ class ReviewCommand(Command):
     @staticmethod
     async def review(
         repo_root: Path,
-        commit_message: str,
+        commit_message: Optional[str],
         modified_files: str,
         git_diff: str,
         model: str,
@@ -293,21 +311,27 @@ class ReviewCommand(Command):
         options = AgentOptions(
             cwd=repo_root,
             model=model,
-            allowed_tools=["Read", "Glob", "Grep"],
+            allowed_tools=["Bash", "Read"],
             instructions=(
                 "You are an expert pull-request reviewer. Your job is to protect correctness and production "
                 "safety while avoiding noise. Start from the provided diff and review changed hunks first. "
-                "Only read full files when the diff context is insufficient, and inspect additional files only "
-                "when needed to verify behavior, dependencies, "
-                "or test coverage. Prioritize findings by user impact and likelihood: report only concrete "
+                "Prefer judging from the diff alone; when a hunk truly needs more context, use Bash for "
+                "targeted discovery (for example rg, git diff, sed, python/python3 for example. Prefer rg to grep)," 
+                "then use Read with targeted ranges (offset/limit) around those lines. Inspect additional files only when "
+                "needed to verify behavior, dependencies, or test coverage. Bash commands already run from repository root; "
+                "do not prepend cd unless you intentionally need a subdirectory. Avoid broad exploration and "
+                "exploratory Bash unless a single minimal command is necessary to validate a concrete claim. "
+                "Prioritize findings by user impact and likelihood: report only concrete "
                 "issues that can cause malfunction, regression, security exposure, data corruption/loss, or "
                 "maintainability risk with clear downstream impact. Do not speculate; if evidence is too weak, "
                 "omit the issue. For each reported issue, tie the claim to specific code behavior and provide "
-                "a practical fix. Keep the review concise, high-signal, and strictly compliant with the "
-                "requested JSON schema."
+                "a practical fix. Do not invent nice_to_have nits to fill the output—use an empty list unless a "
+                "non-blocking suggestion is clearly worthwhile. Keep the review concise, high-signal, and strictly compliant with the "
+                "requested JSON schema. Prioritize high-quality feedback while keeping the review fast."
             ),
             reasoning_effort=reasoning_effort,
-            reasoning_summary="auto",
+            reasoning_summary=None,
+            bash_timeout_ms=5_000,
             max_turns=50
         )
         review = ""
@@ -316,6 +340,27 @@ class ReviewCommand(Command):
         last_elapsed_logged = -1
         elapsed_visible = False
         interactive_output = sys.stdout.isatty()
+        workspace_root = repo_root.resolve()
+
+        def shorten_status_path(path_text: str) -> str:
+            normalized = path_text.strip()
+            if not normalized:
+                return normalized
+
+            # Keep relative paths as-is; they are already concise.
+            if not (normalized.startswith("/") or normalized.startswith("~/")):
+                return normalized
+
+            candidate = Path(normalized).expanduser()
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                resolved = candidate
+
+            try:
+                return resolved.relative_to(workspace_root).as_posix()
+            except ValueError:
+                return resolved.as_posix()
 
         def normalize_status_detail(value: object) -> Optional[str]:
             if value is None:
@@ -346,6 +391,7 @@ class ReviewCommand(Command):
             else:
                 detail = str(value).strip()
 
+            detail = shorten_status_path(detail)
             detail = " ".join(detail.split())
             if not detail:
                 return None
@@ -377,6 +423,47 @@ class ReviewCommand(Command):
 
             return None
 
+        def get_shell_tool_call_detail(message: AgentToolCall) -> Optional[str]:
+            for attr in ["arguments", "args", "input", "tool_input", "payload"]:
+                raw_value = getattr(message, attr, None)
+                if raw_value is None:
+                    continue
+
+                if isinstance(raw_value, str):
+                    try:
+                        raw_value = json.loads(raw_value)
+                    except json.JSONDecodeError:
+                        raw_value = None
+                if not isinstance(raw_value, dict):
+                    continue
+
+                commands = raw_value.get("commands")
+                if isinstance(commands, (list, tuple)):
+                    rendered_commands: list[str] = []
+                    for item in commands:
+                        if isinstance(item, str):
+                            command = " ".join(item.split())
+                            if command:
+                                rendered_commands.append(command)
+                            continue
+                        if not isinstance(item, dict):
+                            continue
+                        raw_command = item.get("command")
+                        if isinstance(raw_command, str):
+                            command = " ".join(raw_command.split())
+                            if command:
+                                rendered_commands.append(command)
+                    if rendered_commands:
+                        return " ; ".join(rendered_commands)
+
+                command = raw_value.get("command")
+                if isinstance(command, str):
+                    normalized_command = " ".join(command.split())
+                    if normalized_command:
+                        return normalized_command
+
+            return get_tool_call_detail(message, "commands", "command")
+
         def get_tool_call_status(message: AgentToolCall) -> str:
             tool_name = str(message.name).strip() or "Tool"
             normalized_tool_name = tool_name.lower()
@@ -385,13 +472,9 @@ class ReviewCommand(Command):
                 detail = get_tool_call_detail(message, "path", "file_path")
                 return f"Reading {detail}" if detail else "Reading"
 
-            if normalized_tool_name in ["grep", "grep_files"]:
-                detail = get_tool_call_detail(message, "pattern", "query")
-                return f"Grep {detail}" if detail else "Grep"
-
-            if normalized_tool_name == "glob":
-                detail = get_tool_call_detail(message, "pattern", "glob")
-                return f"Glob {detail}" if detail else "Glob"
+            if normalized_tool_name in ["bash", "shell_call"]:
+                detail = get_shell_tool_call_detail(message)
+                return f"Running {detail}" if detail else "Running command"
 
             detail = get_tool_call_detail(message, "path", "file_path", "pattern", "query", "glob")
             return f"{tool_name} {detail}" if detail else tool_name

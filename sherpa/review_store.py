@@ -65,6 +65,7 @@ def _issue_from_dict(data: dict[str, Any]) -> Issue:
         file=str(data["file"]),
         details=str(data["details"]),
         suggested_fix=str(data["suggested_fix"]),
+        line_range=str(data["line_range"]) if data.get("line_range") is not None else None,
     )
 
 

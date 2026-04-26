@@ -53,9 +53,10 @@ def _print_severity_block(title: str, items: list, marker: str, color: str) -> N
     for issue in items:
         title_line = f"{marker} [{issue.name}] {issue.title}"
         file_line = f"file: {issue.file}"
+        if getattr(issue, "line_range", None):
+            file_line = f"{file_line}:{issue.line_range}"
         why_lines = wrap_text(f"Why: {issue.details}", content_width)
         fix_lines = wrap_text(f"Fix: {issue.suggested_fix}", content_width)
-
         border = "+" + "-" * (card_width - 2) + "+"
         print(colorize(f"  {border}", color))
         print(colorize(f"  | {title_line[:content_width].ljust(content_width)} |", color, bold=True))
@@ -67,7 +68,6 @@ def _print_severity_block(title: str, items: list, marker: str, color: str) -> N
         print(colorize(f"  | {'':{content_width}} |", color))
         for line in fix_lines:
             print(colorize(f"  | {line[:content_width].ljust(content_width)} |", color))
-
         print(colorize(f"  {border}", color))
         print()
 

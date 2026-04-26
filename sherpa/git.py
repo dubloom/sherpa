@@ -6,6 +6,9 @@ from enum import Enum
 from typing import Optional
 
 
+REVIEW_DIFF_CONTEXT_LINES = 20
+
+
 class SherpaGitExcludeStatus(Enum):
     ADDED = "added"
     ALREADY_PRESENT = "already_present"
@@ -87,6 +90,7 @@ def get_staged_changes(root: Path) -> tuple[Optional[str], [str]]:
             "--no-color",
             "--no-ext-diff",
             "--minimal",
+            f"--unified={REVIEW_DIFF_CONTEXT_LINES}",
         ],
         cwd=root,
         warning_message="Could not retrieve git diff"
@@ -138,6 +142,7 @@ def get_branch_changes(root: Path, branch: str = "HEAD") -> tuple[Optional[str],
             "--no-color",
             "--no-ext-diff",
             "--minimal",
+            f"--unified={REVIEW_DIFF_CONTEXT_LINES}",
             diff_range,
         ],
         cwd=root,
@@ -176,6 +181,7 @@ def get_commit_changes(
             "--no-color",
             "--no-ext-diff",
             "--minimal",
+            f"--unified={REVIEW_DIFF_CONTEXT_LINES}",
             "--pretty=format:",
             commit_ref,
         ],

@@ -1,12 +1,14 @@
 from pathlib import Path
 
+
 def get_review_prompt(
     repo_root: Path,
     modified_files: str,
-    git_diff: str
+    git_diff: str,
 ):
     return f"""\
 Review the provided git changes.
+
 Return ONLY valid JSON with this exact shape:
 {{
 "decision": "APPROVE" | "BLOCKED",
@@ -17,20 +19,12 @@ Return ONLY valid JSON with this exact shape:
     "title": "short title",
     "severity": "low" | "medium" | "high",
     "file": "path/to/file",
+    "line_range": "start-end or start",
     "details": "why this is a problem",
-    "suggested_fix": "how to fix it"
+    "suggested_fix": "how to fix it",
     }}
 ],
-"nice_to_have": [
-    {{
-    "name": "N0",
-    "title": "short title",
-    "file": "path/to/file",
-    "severity": None,
-    "details": "optional non-blocking suggestion",
-    "suggested_fix": "how to improve this"
-    }}
-]
+"nice_to_have": []
 }}
 Do not include markdown fences.
 Do not add any text before or after the JSON.
@@ -46,8 +40,10 @@ Review criteria:
 - Medium severity issues are warnings only and should not block.
 - Low severity issues are informational only.
 - If there are no high severity issues, use decision=APPROVE.
-- Use "nice_to_have" for optional suggestions and assign IDs N0, N1, ...
-- Return at most 2 nice_to_have items, ordered by impact (highest first).
+- "nice_to_have" is optional. Default to an empty array []. Do not invent nits, style opinions, or test ideas just to fill the schema—most reviews should have zero nice_to_have items.
+- Only add a nice_to_have item when it is clearly worthwhile (e.g. concrete follow-up with obvious payoff). At most 2 items, IDs N0, N1, ordered by impact. If unsure, omit.
+- Prefer one proven high-impact issue over several speculative issues.
+- If the diff is large, prioritize correctness and regression risks over style; you may omit low-impact nits to stay within a reasonable tool budget.
 
 Context:
 - Repository root: {repo_root}
