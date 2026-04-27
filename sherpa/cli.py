@@ -6,6 +6,7 @@ from sherpa.commands.address import AddressCommand
 from sherpa.commands.commit import CommitCommand
 from sherpa.commands.config import ConfigCommand
 from sherpa.commands.fix import FixCommand
+from sherpa.commands.hook import HookCommand
 from sherpa.commands.review import ReviewCommand
 from sherpa.commands.token import TokenCommand
 from sherpa.config import config_path, load_or_create_config
@@ -13,6 +14,36 @@ from sherpa.config.tokens import apply_stored_token_env_defaults
 from sherpa.config.ui import is_interactive_session, prompt_new_config
 from sherpa.git import SherpaGitExcludeStatus, ensure_sherpa_git_exclude, get_git_repo_root, in_git_repo
 from sherpa.utils import extract_model_flag, extract_reasoning_flag
+
+
+def print_global_help() -> None:
+    """Print top-level usage (stdout), for -h / --help / help."""
+    print(
+        """\
+Usage:
+  sherpa [--model MODEL] [--reasoning low|medium|high] <command> [arguments...]
+
+Commands:
+  commit    Review staged changes, then run git commit
+  review    Run a standalone AI review on your changes
+  fix       Apply fixes for issues from the latest review
+  address   Browse GitHub PR threads and run fix flows
+  hook      Manage commit hooks (pre-review)
+  config    Edit Sherpa configuration for this repo
+  token     Store provider API tokens (works outside a git repository)
+
+Global options:
+  --model MODEL              Use this model for the invocation (see supported models in docs)
+  --reasoning LEVEL          OpenAI only: low | medium | high
+  -h, --help                 Show this message
+  help                       Same as --help
+
+Most commands must be run inside a git repository. Exceptions: token, and this help.
+
+Documentation: https://github.com/dubloom/sherpa#readme\
+"""
+    )
+
 
 def main():
     sherpa_args, model, model_error = extract_model_flag()
@@ -25,11 +56,15 @@ def main():
         print(f"Error: {reasoning_error}", file=sys.stderr)
         return 1
     if not sherpa_args:
-        print("Error extracing reasoning : no provided args", file=sys.stderr)
-        return 1
+        print_global_help()
+        return 2
 
     # This is the only command that can be run anywhere as it is just used to set tokens
     command = sherpa_args[0]
+    if command in ("--help", "-h", "help"):
+        print_global_help()
+        return 0
+
     if command == Commands.TOKEN.value:
         return TokenCommand.execute(sherpa_args[1:], None, None)
 
@@ -76,6 +111,8 @@ def main():
             AddressCommand.execute(sherpa_args[1:], git_repo_root, config)
         case Commands.REVIEW.value:
             ReviewCommand.execute(sherpa_args[1:], git_repo_root, config)
+        case Commands.HOOK.value:
+            return HookCommand.execute(sherpa_args[1:], git_repo_root, config)
         case _:
             print(f"Error: unrecognized {command} command", file=sys.stderr)
             return 1

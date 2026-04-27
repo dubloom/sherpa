@@ -7,3 +7,4 @@ class Commands(str, Enum):
     ADDRESS = "address"
     CONFIG = "config"
     TOKEN = "token"
+    HOOK = "hook"

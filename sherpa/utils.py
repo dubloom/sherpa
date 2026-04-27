@@ -63,9 +63,8 @@ def extract_commit_message(args: list[str]) -> Optional[str]:
         if args[i] == "-m":
             if i+1 >= len(args):
                 return None
-            else:
-                return str(args[i+1]).strip().replace(" ", "_")
 
+            return str(args[i + 1]).strip()
 
 # Shared retry/instruction helpers for fix flows
 AUTO_RETRY_NO_CHANGE_INSTRUCTION = (

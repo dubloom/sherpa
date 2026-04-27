@@ -110,6 +110,33 @@ Each issue/nit gets an identifier you can use in the fix stage.
 
 When a commit is approved via `sherpa commit`, Sherpa appends an `Approved-By: <model_name>` trailer to the commit message.
 
+### Commit hooks (`pre-review`)
+
+Sherpa supports repo-local commit hooks that run before AI review.
+
+Create a named hook:
+
+```bash
+sherpa hook add lint
+```
+
+This scaffolds a single prompt-only Glyph markdown workflow, for example `.sherpa/hooks/lint.md`. Edit the step body to describe what the model should check; placeholders `{{ key }}` are filled from Sherpa (see comments at the top of the generated file).
+
+At commit time, Sherpa discovers every `*.md` workflow under `.sherpa/hooks/` and runs them sequentially in sorted path/name order.
+
+Hook context is passed as `initial_input` and includes:
+- `repo_root`
+- `commit_args`
+- `commit_message`
+- `modified_files`
+- `git_diff`
+
+The model’s final message must be JSON Sherpa can parse (plain JSON or one fenced block is accepted):
+- `{"status": "continue"}` to keep going
+- `{"status": "block", "message": "reason"}` to stop before AI review
+
+The first hook returning `block` aborts commit flow. Hook execution errors are also treated as safe failures and abort before review.
+
 ### `sherpa fix`: fix selected issues
 
 Use `sherpa fix` to select one or more issues from the latest stored review and apply fixes.

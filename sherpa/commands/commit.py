@@ -7,6 +7,7 @@ from sherpa.commands.review import ReviewCommand, ReviewResult
 from sherpa.commands.review.report import render_review_report
 from sherpa.config import SherpaConfig
 from sherpa.git import get_staged_changes
+from sherpa.hooks import run_commit_pre_review_hooks
 from sherpa.review_store import save_review
 from sherpa.utils import extract_commit_message
 
@@ -66,13 +67,24 @@ def _build_approved_commit_args(args: list[str], model_name: str) -> list[str]:
 class CommitCommand(Command):
     @staticmethod
     def execute(args: list[str], repo_root: Path, config: SherpaConfig):
-        print("[sherpa] Reviewing staged changes")
-
         commit_message = extract_commit_message(args)
         modified_files, git_diff = get_staged_changes(repo_root)
         if not modified_files and not git_diff:
             print("[sherpa] It seems you don't have any staged changes, exiting...")
             return
+
+        hook_outcome = run_commit_pre_review_hooks(
+            repo_root,
+            commit_args=args,
+            commit_message=commit_message,
+            modified_files=modified_files,
+            git_diff=git_diff,
+        )
+        if not hook_outcome.should_continue:
+            print(f"[sherpa] Commit aborted by hook: {hook_outcome.reason}")
+            return
+
+        print("[sherpa] Reviewing staged changes")
 
         review_result, total_cost = asyncio.run(
             ReviewCommand.review(
