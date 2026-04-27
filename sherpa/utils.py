@@ -59,12 +59,17 @@ def extract_reasoning_flag(args: list[str]) -> tuple[list[str], Optional[str], O
 
 
 def extract_commit_message(args: list[str]) -> Optional[str]:
-    for i in range(len(args)):
-        if args[i] == "-m":
-            if i+1 >= len(args):
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "-m" or arg == "--message":
+            if i + 1 >= len(args):
                 return None
-
             return str(args[i + 1]).strip()
+        if arg.startswith("--message="):
+            _, value = arg.split("=", maxsplit=1)
+            return value.strip()
+        i += 1
 
 # Shared retry/instruction helpers for fix flows
 AUTO_RETRY_NO_CHANGE_INSTRUCTION = (
